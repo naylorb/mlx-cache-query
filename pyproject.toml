@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlx-cache-query"
+version = "0.1.0"
+description = "Local-first KV cache query system for Apple Silicon"
+requires-python = ">=3.11"
+dependencies = [
+    "mlx>=0.22.0",
+    "mlx-lm>=0.22.0",
+    "click>=8.1",
+    "pymupdf>=1.24",
+    "safetensors>=0.4",
+    "rich>=13.0",
+    "watchdog>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.2",
+]
+api = [
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
+]
+tui = [
+    "textual>=0.40",
+]
+all = [
+    "mlx-cache-query[api,tui]",
+]
+
+[project.scripts]
+mcq = "mcq.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mcq*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
