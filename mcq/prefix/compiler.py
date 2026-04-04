@@ -9,11 +9,28 @@ class PrefixCompiler:
 
     @staticmethod
     def build_prompt_text(corpus: Corpus) -> str:
+        """Build prompt text with wiki-aware ordering.
+
+        If the corpus has an _index.md, it's placed first (master context).
+        Remaining files are sorted alphabetically.
+        """
         parts = [
             "You are answering questions about the following document(s).\n\n"
             "<documents>\n"
         ]
-        for chunk in sorted(corpus.chunks, key=lambda c: c.source_path):
+
+        # Separate index from content — index goes first for wiki-aware corpora
+        index_chunks = []
+        content_chunks = []
+        for chunk in corpus.chunks:
+            if chunk.source_path == "_index.md":
+                index_chunks.append(chunk)
+            else:
+                content_chunks.append(chunk)
+
+        ordered = index_chunks + sorted(content_chunks, key=lambda c: c.source_path)
+
+        for chunk in ordered:
             parts.append(f"[== {chunk.source_path} ==]\n")
             parts.append(chunk.content)
             if not chunk.content.endswith("\n"):

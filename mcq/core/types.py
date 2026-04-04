@@ -9,6 +9,7 @@ class CorpusChunk:
     source_path: str
     content: str
     byte_range: tuple[int, int]
+    metadata: dict | None = field(default=None, hash=False, compare=False)
 
 
 @dataclass

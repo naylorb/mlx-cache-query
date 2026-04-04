@@ -14,12 +14,17 @@ dependencies = [
     "pymupdf>=1.24",
     "safetensors>=0.4",
     "rich>=13.0",
+    "watchdog>=4.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "pytest-timeout>=2.2",
+]
+api = [
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
 ]
 
 [project.scripts]

@@ -47,8 +47,9 @@ def main(ctx: click.Context, use_json: bool, quiet: bool) -> None:
 @main.command()
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--name", "-n", required=True, help="Corpus name for reference")
+@click.option("--format", "-f", "fmt", default="auto", type=click.Choice(["auto", "obsidian"]), help="Ingestion format")
 @click.pass_context
-def ingest(ctx: click.Context, path: str, name: str) -> None:
+def ingest(ctx: click.Context, path: str, name: str, fmt: str) -> None:
     """Ingest a file or directory into a corpus."""
     from mcq.cache.registry import CacheRegistry
     from mcq.ingest.ingestor import CorpusIngestor
@@ -57,7 +58,7 @@ def ingest(ctx: click.Context, path: str, name: str) -> None:
 
     source = Path(path).resolve()
     t0 = time.perf_counter()
-    corpus = CorpusIngestor.ingest(source, name=name)
+    corpus = CorpusIngestor.ingest(source, name=name, format=fmt)
     elapsed = time.perf_counter() - t0
 
     registry = CacheRegistry(REGISTRY_DB)
@@ -558,3 +559,253 @@ def delete(ctx: click.Context, name: str, cache_only: bool) -> None:
         emit_json({"corpus": name, "deleted": deleted, "count": len(deleted)})
     else:
         status.print(f"Removed {len(refs)} artifact(s).")
+
+
+# ---------------------------------------------------------------------------
+# compile
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("name")
+@click.pass_context
+def compile(ctx: click.Context, name: str) -> None:
+    """Compile a corpus into a wiki-structured corpus with an index.
+
+    Generates an _index.md with file summaries and topic extraction.
+    Re-ingests the corpus from its registered source path.
+    """
+    from mcq.cache.registry import CacheRegistry
+    from mcq.compile.compiler import WikiCompiler
+    from mcq.ingest.ingestor import CorpusIngestor
+
+    use_json = ctx.obj["json"]
+    registry = CacheRegistry(REGISTRY_DB)
+    corpus_info = registry.get_corpus(name)
+
+    if not corpus_info:
+        status.print(f"[red]Error:[/red] Corpus '{name}' not found. Run 'mcq ingest' first.")
+        raise SystemExit(1)
+
+    source_path = corpus_info["source_path"]
+
+    with status.status("[bold]Ingesting corpus..."):
+        t0 = time.perf_counter()
+        corpus = CorpusIngestor.ingest(Path(source_path), name=name)
+        t_ingest = time.perf_counter() - t0
+
+    status.print(f"  Ingested {len(corpus.chunks)} files in {t_ingest:.2f}s")
+
+    with status.status("[bold]Compiling wiki index..."):
+        t0 = time.perf_counter()
+        compiled = WikiCompiler.compile(corpus)
+        t_compile = time.perf_counter() - t0
+
+    status.print(f"  Compiled wiki with {len(compiled.chunks)} chunks in {t_compile:.2f}s")
+
+    # Update corpus registration with new hash
+    registry.register_corpus(
+        name=name,
+        source_path=source_path,
+        content_hash=compiled.content_hash,
+        chunk_count=len(compiled.chunks),
+    )
+
+    if use_json:
+        emit_json({
+            "name": name,
+            "chunks": len(compiled.chunks),
+            "hash": compiled.content_hash,
+            "has_index": True,
+            "elapsed_s": round(t_ingest + t_compile, 3),
+        })
+    else:
+        status.print(f"\n[green]✓[/green] Wiki compiled for '{name}' ({len(compiled.chunks)} chunks)")
+
+
+# ---------------------------------------------------------------------------
+# setup
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("path", type=click.Path(exists=True))
+@click.option("--name", "-n", required=True, help="Corpus name")
+@click.option("--model", "-m", default=DEFAULT_MODEL, envvar="MCQ_MODEL", help="Model ID", show_default=True)
+@click.option("--format", "-f", "fmt", default="auto", type=click.Choice(["auto", "obsidian"]), help="Ingestion format")
+@click.option("--no-compile", is_flag=True, help="Skip wiki compilation step")
+@click.pass_context
+def setup(ctx: click.Context, path: str, name: str, model: str, fmt: str, no_compile: bool) -> None:
+    """One-command pipeline: ingest → compile → build.
+
+    \b
+    Example: mcq setup ~/research/papers -n papers
+    """
+    # Invoke ingest
+    ctx.invoke(ingest, path=path, name=name, fmt=fmt)
+
+    # Invoke compile (unless --no-compile)
+    if not no_compile:
+        ctx.invoke(compile, name=name)
+
+    # Invoke build
+    ctx.invoke(build, name=name, model=model)
+
+
+# ---------------------------------------------------------------------------
+# find
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("name")
+@click.argument("query", required=False, default=None)
+@click.option("--top", "-k", "top_k", default=10, help="Number of results", show_default=True)
+@click.option("--content", is_flag=True, help="Output full content of matching chunks (for piping)")
+@click.pass_context
+def find(ctx: click.Context, name: str, query: str | None, top_k: int, content: bool) -> None:
+    """Search a corpus for relevant content.
+
+    \b
+    Examples:
+      mcq find myproject "authentication"
+      mcq find brain "threat modeling" --top 5
+      mcq find brain "auth" --content | fabric -p summarize
+    """
+    from mcq.cache.registry import CacheRegistry
+    from mcq.ingest.ingestor import CorpusIngestor
+    from mcq.search.finder import TextFinder
+
+    use_json = ctx.obj["json"]
+    registry = CacheRegistry(REGISTRY_DB)
+    corpus_info = registry.get_corpus(name)
+
+    if not corpus_info:
+        status.print(f"[red]Error:[/red] Corpus '{name}' not found.")
+        raise SystemExit(1)
+
+    # Read question from stdin if not provided
+    if not query:
+        if not is_interactive():
+            query = sys.stdin.read().strip()
+        if not query:
+            status.print("[red]Error:[/red] No search query provided.")
+            raise SystemExit(1)
+
+    with status.status("[bold]Searching..."):
+        corpus = CorpusIngestor.ingest(Path(corpus_info["source_path"]), name=name)
+        results = TextFinder.search(corpus, query, top_k=top_k)
+
+    if use_json:
+        emit_json([
+            {
+                "source_path": r.chunk.source_path,
+                "score": round(r.score, 3),
+                "snippet": r.snippet,
+            }
+            for r in results
+        ])
+    elif content:
+        # Pipe-friendly: output full content of matching chunks
+        for r in results:
+            sys.stdout.write(f"[== {r.chunk.source_path} ==]\n")
+            sys.stdout.write(r.chunk.content)
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+    else:
+        if not results:
+            status.print("No results found.")
+            return
+
+        from rich.table import Table
+        table = Table(title=f"Search: '{query}'")
+        table.add_column("Score", justify="right", style="bold")
+        table.add_column("File")
+        table.add_column("Snippet", max_width=80)
+
+        for r in results:
+            table.add_row(
+                f"{r.score:.2f}",
+                r.chunk.source_path,
+                r.snippet.replace("\n", " ")[:120],
+            )
+        output.print(table)
+
+
+# ---------------------------------------------------------------------------
+# watch
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("name")
+@click.pass_context
+def watch(ctx: click.Context, name: str) -> None:
+    """Watch a corpus source for changes and prompt to rebuild.
+
+    \b
+    Example: mcq watch myproject
+    """
+    from mcq.cache.registry import CacheRegistry
+    from mcq.ingest.ingestor import CorpusIngestor
+    from mcq.watch.watcher import FileWatcher
+
+    registry = CacheRegistry(REGISTRY_DB)
+    corpus_info = registry.get_corpus(name)
+
+    if not corpus_info:
+        status.print(f"[red]Error:[/red] Corpus '{name}' not found.")
+        raise SystemExit(1)
+
+    source_path = corpus_info["source_path"]
+    status.print(f"Watching [bold]{source_path}[/bold] for changes...")
+    status.print("Press Ctrl+C to stop.\n")
+
+    def on_change(changed_path: str):
+        status.print(f"[yellow]Changed:[/yellow] {changed_path}")
+        # Re-hash to check if corpus actually changed
+        corpus = CorpusIngestor.ingest(Path(source_path), name=name)
+        if corpus.content_hash != corpus_info["content_hash"]:
+            status.print(f"[bold]Corpus content changed.[/bold] Run 'mcq build {name}' to rebuild cache.")
+            corpus_info["content_hash"] = corpus.content_hash
+        else:
+            status.print("[dim]Content hash unchanged — no rebuild needed.[/dim]")
+
+    watcher = FileWatcher(Path(source_path), on_change=on_change)
+    try:
+        watcher.run_forever()
+    except KeyboardInterrupt:
+        status.print("\nStopped watching.")
+
+
+# ---------------------------------------------------------------------------
+# serve
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.option("--port", "-p", default=8420, envvar="MCQ_PORT", help="Port to listen on", show_default=True)
+@click.option("--host", default="127.0.0.1", envvar="MCQ_HOST", help="Host to bind to", show_default=True)
+@click.pass_context
+def serve(ctx: click.Context, port: int, host: str) -> None:
+    """Start the mcq API server.
+
+    \b
+    Endpoints:
+      GET /health          — health check
+      GET /corpora         — list corpora
+      GET /artifacts       — list cache artifacts
+      GET /info/{name}     — corpus details
+      GET /find/{name}?q=  — text search
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        status.print("[red]Error:[/red] Install API dependencies: pip install 'mlx-cache-query[api]'")
+        raise SystemExit(1)
+
+    from mcq.api.server import create_app
+
+    status.print(f"Starting mcq API server on [bold]http://{host}:{port}[/bold]")
+    status.print("Press Ctrl+C to stop.\n")
+    uvicorn.run(create_app(), host=host, port=port, log_level="info")

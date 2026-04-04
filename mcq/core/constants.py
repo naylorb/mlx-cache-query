@@ -13,5 +13,8 @@ SUPPORTED_EXTENSIONS = frozenset({
     ".txt", ".md", ".py", ".rs", ".js", ".ts", ".jsx", ".tsx",
     ".json", ".toml", ".yaml", ".yml", ".cfg", ".ini",
     ".c", ".h", ".cpp", ".hpp", ".java", ".go", ".rb", ".sh",
-    ".pdf",
+    ".pdf", ".qmd",
 })
+
+# Directories to always skip during ingestion
+SKIP_DIRS = frozenset({".obsidian", ".git", "__pycache__", "node_modules", ".venv", "venv"})
