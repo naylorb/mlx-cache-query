@@ -1026,3 +1026,31 @@ def chat(ctx: click.Context, name: str, model: str, max_tokens: int) -> None:
 
     status.print(f"\n[dim]Session: {query_count} queries, {total_tokens} tokens[/dim]")
     status.print("Bye.")
+
+
+# ---------------------------------------------------------------------------
+# app (GUI)
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+def app() -> None:
+    """Launch the mcq GUI — Spotlight-style search + chat interface.
+
+    \b
+    A full-screen terminal app with:
+    - Corpus browser sidebar
+    - Spotlight-style search (Ctrl+K)
+    - Document preview
+    - Chat panel with LLM query (Ctrl+J)
+
+    \b
+    Requires: pip install 'mcq[tui]'
+    """
+    try:
+        from mcq.tui.app import run_app
+    except ImportError:
+        from mcq.console import status
+        status.print("[red]Error:[/red] TUI requires textual. Install with: pip install 'mcq[tui]'")
+        raise SystemExit(1)
+    run_app()
