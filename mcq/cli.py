@@ -1054,3 +1054,144 @@ def app() -> None:
         status.print("[red]Error:[/red] TUI requires textual. Install with: pip install 'mcq[tui]'")
         raise SystemExit(1)
     run_app()
+
+
+# ---------------------------------------------------------------------------
+# lint
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("name")
+@click.pass_context
+def lint(ctx: click.Context, name: str) -> None:
+    """Run health checks on a corpus — find gaps, broken links, duplicates.
+
+    \b
+    Checks for:
+      - Empty files
+      - Broken [[wikilinks]]
+      - Very large files (may need splitting)
+      - Missing headings in markdown files
+      - Duplicate content across files
+    """
+    from mcq.cache.registry import CacheRegistry
+    from mcq.compile.linter import WikiLinter
+    from mcq.ingest.ingestor import CorpusIngestor
+
+    use_json = ctx.obj["json"]
+    registry = CacheRegistry(REGISTRY_DB)
+    corpus_info = registry.get_corpus(name)
+
+    if not corpus_info:
+        status.print(f"[red]Error:[/red] Corpus '{name}' not found.")
+        raise SystemExit(1)
+
+    with status.status("[bold]Running health checks..."):
+        corpus = CorpusIngestor.ingest(Path(corpus_info["source_path"]), name=name)
+        issues = WikiLinter.lint(corpus)
+
+    if use_json:
+        emit_json([
+            {"severity": i.severity, "file": i.file_path, "message": i.message, "suggestion": i.suggestion}
+            for i in issues
+        ])
+        return
+
+    if not issues:
+        status.print(f"[green]✓[/green] No issues found in '{name}' ({len(corpus.chunks)} files)")
+        return
+
+    from rich.table import Table
+    table = Table(title=f"Lint: {name} ({len(issues)} issues)")
+    table.add_column("Severity", style="bold")
+    table.add_column("File")
+    table.add_column("Issue")
+    table.add_column("Suggestion", style="dim")
+
+    severity_styles = {"error": "red", "warning": "yellow", "info": "blue"}
+    for issue in issues:
+        style = severity_styles.get(issue.severity, "white")
+        table.add_row(
+            f"[{style}]{issue.severity}[/{style}]",
+            issue.file_path,
+            issue.message,
+            issue.suggestion or "",
+        )
+    output.print(table)
+
+    errors = sum(1 for i in issues if i.severity == "error")
+    warnings = sum(1 for i in issues if i.severity == "warning")
+    status.print(f"\n  {errors} error(s), {warnings} warning(s), {len(issues) - errors - warnings} info")
+
+
+# ---------------------------------------------------------------------------
+# sync
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("name")
+@click.argument("action", type=click.Choice(["status", "commit", "pull", "push", "init"]))
+@click.option("--message", "-m", default="Update knowledge base", help="Commit message")
+@click.pass_context
+def sync(ctx: click.Context, name: str, action: str, message: str) -> None:
+    """Git sync a corpus source directory.
+
+    \b
+    Actions:
+      init     Initialize git repo in corpus source directory
+      status   Show git status
+      commit   Stage all changes and commit
+      pull     Pull from remote
+      push     Push to remote
+
+    \b
+    Examples:
+      mcq sync brain init
+      mcq sync brain commit -m "Add new research notes"
+      mcq sync brain push
+    """
+    from mcq.cache.registry import CacheRegistry
+    from mcq.sync.git import GitSync
+
+    use_json = ctx.obj["json"]
+    registry = CacheRegistry(REGISTRY_DB)
+    corpus_info = registry.get_corpus(name)
+
+    if not corpus_info:
+        status.print(f"[red]Error:[/red] Corpus '{name}' not found.")
+        raise SystemExit(1)
+
+    source = Path(corpus_info["source_path"])
+
+    actions = {
+        "init": lambda: GitSync.init(source),
+        "status": None,
+        "commit": lambda: GitSync.commit_all(source, message),
+        "pull": lambda: GitSync.pull(source),
+        "push": lambda: GitSync.push(source),
+    }
+
+    if action == "status":
+        git_status = GitSync.status(source)
+        if use_json:
+            emit_json(git_status)
+        else:
+            if not git_status["is_repo"]:
+                status.print(f"'{name}' is not a git repository. Run: mcq sync {name} init")
+            else:
+                status.print(f"Branch: [bold]{git_status['branch']}[/bold]")
+                status.print(f"Changed files: {git_status['changed_files']}")
+                for change in git_status.get("changes", []):
+                    status.print(f"  {change}")
+        return
+
+    result = actions[action]()
+    if use_json:
+        emit_json({"action": result.action, "message": result.message, "changed_files": result.changed_files})
+    else:
+        if result.action == "error":
+            status.print(f"[red]Error:[/red] {result.message}")
+        else:
+            status.print(f"[green]✓[/green] {result.action}: {result.message}")
