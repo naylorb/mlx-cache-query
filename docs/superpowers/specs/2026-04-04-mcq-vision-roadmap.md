@@ -10,6 +10,57 @@ For small corpora (<32K tokens), a pure KV cache is all you need. For large coll
 
 This is not RAG. This is not keyword search. This is **local semantic memory with persistent attention state**.
 
+## Research Context: Karpathy's "LLM Knowledge Bases" (April 2, 2026)
+
+Andrej Karpathy published a workflow for building personal knowledge bases with LLMs that went viral and directly validates mcq's thesis. His system:
+
+1. **Ingest**: Index source documents (articles, papers, repos, datasets, images) into a `raw/` directory
+2. **Compile**: LLM incrementally "compiles" a wiki — `.md` files with summaries, backlinks, concepts, articles, all interlinked
+3. **Frontend**: Obsidian as the "IDE frontend" — view raw data and compiled wiki, LLM maintains everything
+4. **Query**: At scale (~100 articles, ~400K words), ask complex questions against the wiki
+
+His key insight: *"Context engineering is the delicate art and science of filling the context window with just the right information for the next step."*
+
+### The Gap mcq Fills
+
+Karpathy's workflow re-reads documents through the context window every query. At 400K words, that's expensive and slow — even with cloud LLMs. mcq makes this persistent:
+
+```
+Karpathy today:   raw/ → LLM compiles wiki → put in context window → query (re-reads every time)
+Karpathy + mcq:   raw/ → LLM compiles wiki → mcq builds KV cache → reload <1s → query instantly
+```
+
+The KV cache IS the compiled context window, persisted to disk. The model has already "read" everything. Reload is instant. Queries are local and private. This is the infrastructure layer Karpathy's workflow is missing.
+
+### The "LLM as Compiler" Pattern
+
+Karpathy's approach treats the LLM as a **compiler** that transforms raw documents into structured, navigable knowledge. mcq should support this natively:
+
+```bash
+# Step 1: Ingest raw sources
+mcq ingest ~/research/raw -n quantum-computing
+
+# Step 2: LLM compiles a wiki (using Fabric, Claude, etc.)
+fabric -p compile_wiki < ~/research/raw/*.md > ~/research/wiki/
+
+# Step 3: mcq caches the compiled wiki for instant querying
+mcq ingest ~/research/wiki -n quantum-wiki
+mcq build quantum-wiki
+
+# Step 4: Query instantly, repeatedly
+mcq query quantum-wiki "What are the latest approaches to error correction?"
+```
+
+Or even better — mcq could have a built-in compile step that does the wiki compilation locally:
+
+```bash
+mcq compile ~/research/raw -n quantum --output ~/research/wiki
+mcq build quantum
+mcq query quantum "error correction approaches"
+```
+
+---
+
 ## Who This Is For
 
 **The ML researcher** (Karpathy archetype): 200 arxiv PDFs, experiment code across 30 repos, lecture notes. Needs to query "what papers discuss KV cache compression for long contexts?" and get an answer that synthesizes across papers — not a list of filenames.
@@ -23,6 +74,37 @@ This is not RAG. This is not keyword search. This is **local semantic memory wit
 ---
 
 ## User Stories
+
+### V1.7: The Karpathy Workflow (New — High Priority)
+
+**US-0A: Raw-to-wiki compilation**
+> As a researcher following the Karpathy workflow, I want mcq to compile my raw documents into a structured wiki with summaries and indexes before building the KV cache, so the model has better-organized context to attend to.
+
+Acceptance criteria:
+- `mcq compile ~/research/raw -n quantum` — LLM reads raw docs, generates structured wiki
+- Uses local model (same as query model) to generate summaries, indexes, concept articles
+- Outputs `.md` files with `[[wikilinks]]`, backlinks, and an `_index.md` master file
+- Compilation is incremental — only re-compiles changed files
+- Can also use external tools: `mcq ingest --compiled ~/research/wiki -n quantum` (skip compile, just ingest pre-compiled wiki)
+- `mcq compile --dry-run` shows what would be compiled without doing it
+
+**US-0B: Karpathy-style ingest → compile → cache → query pipeline**
+> As a power user, I want a single command that takes a raw folder and produces a queryable cached knowledge base.
+
+Acceptance criteria:
+- `mcq setup ~/research/raw -n quantum` — ingests, compiles, builds cache in one pipeline
+- Shows progress: "Ingesting 47 files → Compiling wiki → Building cache (8,192 tokens) → Done"
+- Equivalent to: `mcq ingest → mcq compile → mcq build` in sequence
+- `mcq setup --no-compile` skips compilation, just ingests + builds (current V1 behavior)
+
+**US-0C: Wiki-aware prompt template**
+> As a user with a compiled wiki, I want the prompt template to leverage the wiki's structure (indexes, summaries, backlinks) for better answers.
+
+Acceptance criteria:
+- When a corpus has an `_index.md`, it's placed first in the prompt (master context)
+- Summary files are placed before detailed articles
+- Backlinks preserved so the model understands document relationships
+- Prompt template version bumped to "v2" for wiki-aware layout
 
 ### V2: Knowledge Base Mode
 
@@ -262,7 +344,12 @@ V5 (ecosystem):
 | Spotlight / Alfred | Keyword file search | mcq is semantic, understands content |
 | NotebookLM | Google's document AI | mcq is local, private, extensible |
 
-**mcq's unique position**: Local-first semantic memory with persistent attention state. Not RAG. Not keyword search. The model has **read** your documents.
+**mcq's unique position**: Local-first semantic memory with persistent attention state. Not RAG. Not keyword search. The model has **read** your documents. The local infrastructure layer for Karpathy's "LLM Knowledge Bases" workflow.
+
+| Tool | What it does | mcq's advantage |
+|------|-------------|-----------------|
+| Karpathy's workflow | Cloud LLM + Obsidian wiki | mcq persists the context as KV cache — no re-reading |
+| rvk7895/llm-knowledge-bases | Claude Code plugin for Karpathy workflow | mcq is the query/cache layer, complements this |
 
 ## Milestones
 
@@ -270,7 +357,8 @@ V5 (ecosystem):
 |-------|----------|--------|-----------------|
 | V1 | Foundation | ✅ Done | Core pipeline + CLI |
 | V1.5 | Polish | ✅ Done | Charm-quality UX, pipe support |
-| V2 | Memory | Next | Obsidian/QMD, watch mode, multi-corpus |
+| V1.7 | Karpathy | Next | Wiki compile step, structured ingestion, wiki-aware prompts |
+| V2 | Memory | After V1.7 | Obsidian/QMD, watch mode, multi-corpus |
 | V3 | Search | After V2 | Local embeddings, fuzzy finder TUI, hybrid query |
 | V4 | Vision | After V3 | Screenshots, visual PDF, VLM integration |
 | V5 | Ecosystem | After V4 | API server, Obsidian plugin, Raycast, menu bar |
@@ -285,3 +373,5 @@ V5 (ecosystem):
 6. **Progressive disclosure.** Simple defaults, power flags. `mcq query x "y"` just works.
 7. **Deterministic.** Same input → same cache → same hash. Always reproducible.
 8. **The cache is the product.** Everything revolves around building, managing, and querying persistent KV state.
+9. **Context engineering > prompt engineering.** The quality of what goes into the cache determines the quality of answers. Compilation, ordering, and structuring of documents is first-class.
+10. **Knowledge compounds.** Answers become new wiki pages. The knowledge base grows. The cache gets richer. This is a flywheel, not a one-shot tool.
