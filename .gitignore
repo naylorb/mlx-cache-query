@@ -2,5 +2,5 @@ __pycache__/
 *.egg-info/
 *.pyc
 dist/
-build/
+/build/
 .pytest_cache/

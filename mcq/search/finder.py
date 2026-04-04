@@ -1,10 +1,17 @@
-"""TextFinder — BM25-style text search across corpus chunks."""
+"""BM25-style text search across corpus chunks.
+
+Used for two things:
+1. `mcq find` — search without loading a model
+2. Cache selection — when you have multiple caches, find the right one
+
+No embeddings, no vectors. Just fast, proven text retrieval.
+"""
 from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
 from collections import Counter
+from dataclasses import dataclass
 
 from mcq.core.types import Corpus, CorpusChunk
 
@@ -13,18 +20,16 @@ from mcq.core.types import Corpus, CorpusChunk
 class SearchResult:
     chunk: CorpusChunk
     score: float
-    snippet: str  # context around the best match
+    snippet: str
 
 
 class TextFinder:
     @staticmethod
     def search(corpus: Corpus, query: str, top_k: int = 10) -> list[SearchResult]:
-        """Search corpus chunks for relevance to query. Returns ranked results."""
         query_terms = TextFinder._tokenize(query.lower())
         if not query_terms:
             return []
 
-        # Build document frequencies
         n = len(corpus.chunks)
         df: dict[str, int] = Counter()
         chunk_term_freqs: list[Counter] = []
@@ -39,7 +44,7 @@ class TextFinder:
                 df[term] += 1
 
         avg_dl = sum(chunk_lengths) / max(n, 1)
-        k1, b = 1.5, 0.75  # BM25 parameters
+        k1, b = 1.5, 0.75
 
         results = []
         for i, chunk in enumerate(corpus.chunks):
@@ -66,12 +71,10 @@ class TextFinder:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        """Simple word tokenization."""
         return re.findall(r'\w+', text)
 
     @staticmethod
     def _extract_snippet(content: str, query_terms: list[str], context_chars: int = 150) -> str:
-        """Extract a snippet around the first match of any query term."""
         content_lower = content.lower()
         best_pos = len(content)
 

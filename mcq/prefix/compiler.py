@@ -1,43 +1,66 @@
+"""Prefix compiler — corpus text → token sequence.
+
+The prompt template wraps the corpus in a structure the model can
+reason over. This is the context engineering surface — the quality
+of what goes into the cache determines the quality of answers.
+
+Templates:
+  general  — default Q&A over documents
+  code     — optimized for code repositories
+  raw      — minimal wrapping, maximum context
+
+The template ends with `<query>\\n` — the KV cache covers everything
+up to that point. At query time we append the question and `</query>`.
+"""
 from __future__ import annotations
 
 from mcq.core.constants import DEFAULT_QUERY_BUDGET, PROMPT_TEMPLATE_VERSION
 from mcq.core.types import Corpus, TokenizedPrefix
+
+TEMPLATES = {
+    "general": (
+        "You are answering questions about the following document(s). "
+        "Be precise and cite file names when relevant.\n\n"
+    ),
+    "code": (
+        "You are a code expert answering questions about the following codebase. "
+        "Reference specific files, functions, and line ranges. "
+        "Be precise and technical.\n\n"
+    ),
+    "raw": "",
+}
 
 
 class PrefixCompiler:
     TEMPLATE_VERSION = PROMPT_TEMPLATE_VERSION
 
     @staticmethod
-    def build_prompt_text(corpus: Corpus) -> str:
-        """Build prompt text with wiki-aware ordering.
+    def build_prompt_text(corpus: Corpus, template: str = "general") -> str:
+        """Build the full prompt text that will be cached.
 
-        If the corpus has an _index.md, it's placed first (master context).
-        Remaining files are sorted alphabetically.
+        Structure:
+            {system preamble}
+            <documents>
+            [== path/to/file.md ==]
+            {content}
+
+            [== path/to/other.py ==]
+            {content}
+            </documents>
+
+            <query>
         """
-        parts = [
-            "You are answering questions about the following document(s).\n\n"
-            "<documents>\n"
-        ]
+        preamble = TEMPLATES.get(template, TEMPLATES["general"])
+        parts = [preamble, "<documents>\n"]
 
-        # Separate index from content — index goes first for wiki-aware corpora
-        index_chunks = []
-        content_chunks = []
-        for chunk in corpus.chunks:
-            if chunk.source_path == "_index.md":
-                index_chunks.append(chunk)
-            else:
-                content_chunks.append(chunk)
-
-        ordered = index_chunks + sorted(content_chunks, key=lambda c: c.source_path)
-
-        for chunk in ordered:
+        for chunk in sorted(corpus.chunks, key=lambda c: c.source_path):
             parts.append(f"[== {chunk.source_path} ==]\n")
             parts.append(chunk.content)
             if not chunk.content.endswith("\n"):
                 parts.append("\n")
             parts.append("\n")
-        parts.append("</documents>\n\n")
-        parts.append("<query>\n")
+
+        parts.append("</documents>\n\n<query>\n")
         return "".join(parts)
 
     @staticmethod
@@ -48,8 +71,9 @@ class PrefixCompiler:
         model_revision: str,
         max_context: int | None = None,
         query_budget: int = DEFAULT_QUERY_BUDGET,
+        template: str = "general",
     ) -> TokenizedPrefix:
-        prompt_text = PrefixCompiler.build_prompt_text(corpus)
+        prompt_text = PrefixCompiler.build_prompt_text(corpus, template=template)
         tokens: list[int] = tokenizer.encode(prompt_text)
 
         if max_context is not None:

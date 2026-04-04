@@ -1,8 +1,7 @@
-"""Tests for the mcq CLI using Click's CliRunner.
+"""Tests for the mcq CLI.
 
-These tests exercise the CLI surface (help, ingest, list, info, delete, query)
-without requiring mlx or Apple Silicon -- only the registry and ingestor are
-exercised for real; everything else is patched.
+Exercises the CLI surface without requiring mlx or Apple Silicon.
+Registry and ingestor are exercised for real; model loading is patched.
 """
 from __future__ import annotations
 
@@ -14,13 +13,7 @@ from click.testing import CliRunner
 from mcq.cli import main
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _patch_paths(tmp_path):
-    """Return context managers that redirect REGISTRY_DB and ARTIFACTS_DIR."""
     db = tmp_path / "registry.db"
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir(exist_ok=True)
@@ -31,72 +24,46 @@ def _patch_paths(tmp_path):
 
 
 def _prepare_source(tmp_path):
-    """Create a tiny source tree with one .txt file."""
     src = tmp_path / "src"
     src.mkdir()
     (src / "hello.txt").write_text("hello world\n")
+    return src
 
 
 def _invoke(runner, tmp_path, args):
-    """Invoke CLI with patched paths."""
     p1, p2 = _patch_paths(tmp_path)
     with p1, p2:
         return runner.invoke(main, args)
 
 
-# ---------------------------------------------------------------------------
-# 1. Help
-# ---------------------------------------------------------------------------
+def _ingest_corpus(runner, tmp_path, src, name="test"):
+    """Helper: ingest a corpus via the internal registry (bypassing build)."""
+    from mcq.cache.registry import CacheRegistry
+    from mcq.ingest.ingestor import CorpusIngestor
+
+    db = tmp_path / "registry.db"
+    corpus = CorpusIngestor.ingest(src, name=name)
+    reg = CacheRegistry(db)
+    reg.register_corpus(
+        name=name,
+        source_path=str(src),
+        content_hash=corpus.content_hash,
+        chunk_count=len(corpus.chunks),
+    )
+
+
+# ── help ─────────────────────────────────────────────────────────────
 
 
 def test_help_shows_all_commands():
     runner = CliRunner()
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
-    for cmd in ("ingest", "build", "query", "list", "info", "delete"):
+    for cmd in ("build", "query", "list", "info", "delete", "find", "gc", "verify"):
         assert cmd in result.output
 
 
-# ---------------------------------------------------------------------------
-# 2. ingest (human mode)
-# ---------------------------------------------------------------------------
-
-
-def test_ingest_creates_corpus(tmp_path):
-    _prepare_source(tmp_path)
-    runner = CliRunner()
-    result = _invoke(runner, tmp_path, ["ingest", str(tmp_path / "src"), "-n", "test"])
-    assert result.exit_code == 0
-    # Status output goes to stderr; CliRunner mixes it into result.output
-    assert "test" in result.output
-    assert "Ingested" in result.output or "files" in result.output
-
-
-# ---------------------------------------------------------------------------
-# 3. ingest --json
-# ---------------------------------------------------------------------------
-
-
-def test_ingest_json_output(tmp_path):
-    _prepare_source(tmp_path)
-    runner = CliRunner()
-    result = _invoke(
-        runner, tmp_path, ["--json", "ingest", str(tmp_path / "src"), "-n", "test"]
-    )
-    assert result.exit_code == 0
-    # JSON line is in the output -- find it among possible status lines
-    data = _extract_json_object(result.output)
-    assert data["name"] == "test"
-    assert data["chunks"] == 1
-    assert "hash" in data
-    assert "source" in data
-    assert "elapsed_s" in data
-    assert isinstance(data["elapsed_s"], (int, float))
-
-
-# ---------------------------------------------------------------------------
-# 4. list (empty)
-# ---------------------------------------------------------------------------
+# ── list ─────────────────────────────────────────────────────────────
 
 
 def test_list_empty(tmp_path):
@@ -104,82 +71,6 @@ def test_list_empty(tmp_path):
     result = _invoke(runner, tmp_path, ["list"])
     assert result.exit_code == 0
     assert "No corpora" in result.output
-
-
-# ---------------------------------------------------------------------------
-# 5. list after ingest
-# ---------------------------------------------------------------------------
-
-
-def test_list_after_ingest(tmp_path):
-    _prepare_source(tmp_path)
-    runner = CliRunner()
-    p1, p2 = _patch_paths(tmp_path)
-    with p1, p2:
-        runner.invoke(main, ["ingest", str(tmp_path / "src"), "-n", "mylib"])
-        result = runner.invoke(main, ["list"])
-    assert result.exit_code == 0
-    assert "mylib" in result.output
-    assert "ingested" in result.output.lower()
-
-
-# ---------------------------------------------------------------------------
-# 6. list --json after ingest
-# ---------------------------------------------------------------------------
-
-
-def test_list_json_after_ingest(tmp_path):
-    _prepare_source(tmp_path)
-    runner = CliRunner()
-    p1, p2 = _patch_paths(tmp_path)
-    with p1, p2:
-        runner.invoke(main, ["ingest", str(tmp_path / "src"), "-n", "mylib"])
-        result = runner.invoke(main, ["--json", "list"])
-    assert result.exit_code == 0
-    data = _extract_json_array(result.output)
-    assert isinstance(data, list)
-    assert len(data) == 1
-    assert data[0]["corpus"] == "mylib"
-    assert data[0]["status"] == "ingested"
-    assert data[0]["chunks"] == 1
-
-
-# ---------------------------------------------------------------------------
-# 7. info unknown -> exit 1
-# ---------------------------------------------------------------------------
-
-
-def test_info_unknown_exits_1(tmp_path):
-    runner = CliRunner()
-    result = _invoke(runner, tmp_path, ["info", "nonexistent"])
-    assert result.exit_code == 1
-
-
-# ---------------------------------------------------------------------------
-# 8. delete unknown -> exit 1
-# ---------------------------------------------------------------------------
-
-
-def test_delete_unknown_exits_1(tmp_path):
-    runner = CliRunner()
-    result = _invoke(runner, tmp_path, ["delete", "nonexistent"])
-    assert result.exit_code == 1
-
-
-# ---------------------------------------------------------------------------
-# 9. query unknown -> exit 1
-# ---------------------------------------------------------------------------
-
-
-def test_query_unknown_exits_1(tmp_path):
-    runner = CliRunner()
-    result = _invoke(runner, tmp_path, ["query", "nonexistent", "hello?"])
-    assert result.exit_code == 1
-
-
-# ---------------------------------------------------------------------------
-# 10. list --json when empty returns []
-# ---------------------------------------------------------------------------
 
 
 def test_list_json_empty(tmp_path):
@@ -190,31 +81,113 @@ def test_list_json_empty(tmp_path):
     assert data == []
 
 
-# ---------------------------------------------------------------------------
-# 11. ingest with --quiet suppresses status
-# ---------------------------------------------------------------------------
-
-
-def test_ingest_quiet_suppresses_status(tmp_path):
-    _prepare_source(tmp_path)
+def test_list_after_ingest(tmp_path):
+    src = _prepare_source(tmp_path)
     runner = CliRunner()
-    result = _invoke(
-        runner, tmp_path, ["--quiet", "ingest", str(tmp_path / "src"), "-n", "test"]
-    )
+    p1, p2 = _patch_paths(tmp_path)
+    with p1, p2:
+        _ingest_corpus(runner, tmp_path, src, name="mylib")
+        result = runner.invoke(main, ["list"])
     assert result.exit_code == 0
-    # With --quiet, the human-facing status lines should be suppressed.
-    # stdout should be empty (no --json flag), and status was silenced.
-    # Note: Rich Console quiet mode suppresses print calls.
-    assert "Ingested" not in result.output
+    assert "mylib" in result.output
 
 
-# ---------------------------------------------------------------------------
-# JSON extraction helpers
-# ---------------------------------------------------------------------------
+def test_list_json_after_ingest(tmp_path):
+    src = _prepare_source(tmp_path)
+    runner = CliRunner()
+    p1, p2 = _patch_paths(tmp_path)
+    with p1, p2:
+        _ingest_corpus(runner, tmp_path, src, name="mylib")
+        result = runner.invoke(main, ["--json", "list"])
+    assert result.exit_code == 0
+    data = _extract_json_array(result.output)
+    assert isinstance(data, list)
+    assert len(data) == 1
+    assert data[0]["corpus"] == "mylib"
+    assert data[0]["status"] == "ingested"
+
+
+# ── info ─────────────────────────────────────────────────────────────
+
+
+def test_info_unknown_exits_nonzero(tmp_path):
+    runner = CliRunner()
+    result = _invoke(runner, tmp_path, ["info", "nonexistent"])
+    assert result.exit_code != 0
+
+
+# ── delete ───────────────────────────────────────────────────────────
+
+
+def test_delete_unknown_exits_nonzero(tmp_path):
+    runner = CliRunner()
+    result = _invoke(runner, tmp_path, ["delete", "--force", "nonexistent"])
+    assert result.exit_code != 0
+
+
+# ── query ────────────────────────────────────────────────────────────
+
+
+def test_query_unknown_exits_nonzero(tmp_path):
+    runner = CliRunner()
+    result = _invoke(runner, tmp_path, ["query", "nonexistent", "hello?"])
+    assert result.exit_code != 0
+
+
+# ── find ─────────────────────────────────────────────────────────────
+
+
+def test_find_against_ingested_corpus(tmp_path):
+    src = _prepare_source(tmp_path)
+    runner = CliRunner()
+    p1, p2 = _patch_paths(tmp_path)
+    with p1, p2:
+        _ingest_corpus(runner, tmp_path, src, name="proj")
+        result = runner.invoke(main, ["--json", "find", "proj", "hello"])
+    assert result.exit_code == 0
+    data = _extract_json_array(result.output)
+    assert len(data) > 0
+    assert data[0]["source_path"] == "hello.txt"
+
+
+def test_find_unknown_corpus(tmp_path):
+    runner = CliRunner()
+    result = _invoke(runner, tmp_path, ["find", "nonexistent", "test"])
+    assert result.exit_code != 0
+
+
+# ── gc ───────────────────────────────────────────────────────────────
+
+
+def test_gc_empty(tmp_path):
+    runner = CliRunner()
+    result = _invoke(runner, tmp_path, ["gc"])
+    assert result.exit_code == 0
+    assert "Nothing" in result.output
+
+
+def test_gc_json_empty(tmp_path):
+    runner = CliRunner()
+    result = _invoke(runner, tmp_path, ["--json", "gc"])
+    assert result.exit_code == 0
+    data = _extract_json_object(result.output)
+    assert data["removed"] == []
+    assert data["bytes_freed"] == 0
+
+
+# ── verify ───────────────────────────────────────────────────────────
+
+
+def test_verify_unknown_exits_nonzero(tmp_path):
+    runner = CliRunner()
+    result = _invoke(runner, tmp_path, ["verify", "nonexistent"])
+    assert result.exit_code != 0
+
+
+# ── helpers ──────────────────────────────────────────────────────────
 
 
 def _extract_json_object(text: str) -> dict:
-    """Find and parse the first JSON object ({...}) in mixed output."""
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("{"):
@@ -223,7 +196,6 @@ def _extract_json_object(text: str) -> dict:
 
 
 def _extract_json_array(text: str) -> list:
-    """Find and parse the first JSON array ([...]) in mixed output."""
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("["):

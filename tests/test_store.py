@@ -91,4 +91,4 @@ def test_delete_removes_file_and_registry(tmp_path: Path):
 
     store.delete(ref, registry)
     assert not fake_file.exists()
-    assert registry.get_by_artifact_hash(fake_hash) is None
+    assert registry.get_by_corpus_name("test") == []

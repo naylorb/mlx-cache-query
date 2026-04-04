@@ -1,3 +1,14 @@
+"""Query engine — the payoff.
+
+Loads a pre-built KV cache, appends the user's question, and generates
+an answer. Supports streaming (for CLI) and batch (for JSON output).
+
+The cached prefix ends with `<query>\\n`. We append:
+    {question}
+    </query>
+
+Then generate.
+"""
 from __future__ import annotations
 
 import copy
@@ -17,8 +28,6 @@ class QueryResult:
 class QueryEngine:
     @staticmethod
     def format_query_prompt(question: str) -> str:
-        # Prefix already ends with "<query>\n", so we just append the question
-        # and close the tag. The cached KV state covers everything up to <query>.
         return f"{question}\n</query>\n"
 
     @staticmethod
@@ -29,6 +38,7 @@ class QueryEngine:
         question: str,
         max_tokens: int = 512,
     ) -> QueryResult:
+        """Run a complete query and return the result."""
         cache = copy.deepcopy(prompt_cache)
         query_text = QueryEngine.format_query_prompt(question)
 
@@ -52,7 +62,7 @@ class QueryEngine:
             token_count += 1
 
         total_s = time.perf_counter() - t0
-        decode_tokens = max(token_count - 1, 1)  # exclude first token from decode rate
+        decode_tokens = max(token_count - 1, 1)
         decode_time = total_s - (ttft / 1000 if ttft else 0)
         tps = decode_tokens / max(decode_time, 0.001)
 
@@ -75,7 +85,6 @@ class QueryEngine:
         cache = copy.deepcopy(prompt_cache)
         query_text = QueryEngine.format_query_prompt(question)
 
-        # Use stream_generate for streaming
         from mlx_lm import stream_generate
 
         for response in stream_generate(

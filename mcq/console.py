@@ -1,12 +1,11 @@
-"""
-Charm-style output separation.
+"""Two-fd output contract.
 
-status  → stderr (spinners, progress, human-facing chrome)
-output  → stdout (data: answers, JSON, pipeable output)
+stderr → chrome (spinners, progress, human-facing status)
+stdout → data (answers, JSON, pipeable output)
 
-When stdout is a pipe: output has no color, no markup.
-When stderr is a pipe: status goes quiet.
-Rich auto-detects TTY on each Console independently.
+When stdout is a pipe: no color, no markup — clean data.
+When stderr is not a TTY: status goes quiet.
+This is the Charm.sh way.
 """
 from __future__ import annotations
 
@@ -17,10 +16,10 @@ from typing import Any
 
 from rich.console import Console
 
-# Human-facing status: always stderr
+# Chrome: always stderr. Spinners, progress, human messages.
 status = Console(stderr=True, highlight=False)
 
-# Machine-facing data: stdout, respects pipe detection
+# Data: stdout. Respects TTY detection automatically.
 output = Console(highlight=False)
 
 
@@ -34,26 +33,15 @@ def is_piped() -> bool:
     return not sys.stdout.isatty()
 
 
-def print_json_or_human(
-    data: Any,
-    *,
-    use_json: bool,
-    human_fn: callable,
-) -> None:
-    """Print structured data as JSON (to stdout) or call human_fn for pretty output.
-
-    human_fn receives `data` and should use `status` or `output` to print.
-    """
-    if use_json:
-        d = asdict(data) if hasattr(data, "__dataclass_fields__") else data
-        output.print_json(json.dumps(d, default=str))
-    else:
-        human_fn(data)
-
-
 def emit_json(data: Any) -> None:
-    """Write a single JSON object to stdout."""
+    """Write a single JSON object/array to stdout. No rich, no color."""
     if hasattr(data, "__dataclass_fields__"):
         data = asdict(data)
     sys.stdout.write(json.dumps(data, default=str) + "\n")
+    sys.stdout.flush()
+
+
+def emit_text(text: str, end: str = "") -> None:
+    """Write raw text to stdout. For streaming tokens."""
+    sys.stdout.write(text + end)
     sys.stdout.flush()
