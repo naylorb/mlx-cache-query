@@ -74,6 +74,11 @@ class CorpusIngestor:
     def _read_pdf(path: Path, rel_path: Path) -> CorpusChunk | None:
         try:
             import fitz
+        except ImportError:
+            import sys
+            print(f"Warning: skipping {rel_path} (pymupdf not installed)", file=sys.stderr)
+            return None
+        try:
             doc = fitz.open(str(path))
             pages = [page.get_text() for page in doc]
             doc.close()

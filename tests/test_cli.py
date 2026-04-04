@@ -184,6 +184,43 @@ def test_verify_unknown_exits_nonzero(tmp_path):
     assert result.exit_code != 0
 
 
+# ── corpus name validation ────────────────────────────────────────────
+
+
+def test_build_rejects_invalid_corpus_name(tmp_path):
+    src = _prepare_source(tmp_path)
+    runner = CliRunner()
+    for bad_name in ["my corpus", "../etc", "", "a/b"]:
+        result = _invoke(runner, tmp_path, ["build", str(src), "-n", bad_name])
+        assert result.exit_code != 0, f"Expected rejection for name '{bad_name}'"
+
+
+def test_build_accepts_valid_corpus_names(tmp_path):
+    """Valid names should pass validation (build will fail later at model load, that's ok)."""
+    src = _prepare_source(tmp_path)
+    runner = CliRunner()
+    for good_name in ["my-project", "docs_v2", "project.2024"]:
+        result = _invoke(runner, tmp_path, ["build", str(src), "-n", good_name])
+        # Will fail at model loading (exit 3) — but NOT at name validation (exit 1)
+        assert result.exit_code != 1 or "Invalid name" not in result.output
+
+
+# ── stats ────────────────────────────────────────────────────────────
+
+
+def test_stats_against_ingested_corpus(tmp_path):
+    src = _prepare_source(tmp_path)
+    runner = CliRunner()
+    p1, p2 = _patch_paths(tmp_path)
+    with p1, p2:
+        _ingest_corpus(runner, tmp_path, src, name="proj")
+        result = runner.invoke(main, ["--json", "stats", "proj"])
+    assert result.exit_code == 0
+    data = _extract_json_object(result.output)
+    assert data["total_files"] == 1
+    assert data["total_words"] > 0
+
+
 # ── helpers ──────────────────────────────────────────────────────────
 
 

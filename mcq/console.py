@@ -28,11 +28,6 @@ def is_interactive() -> bool:
     return sys.stdin.isatty()
 
 
-def is_piped() -> bool:
-    """True when stdout is going to a pipe (not a terminal)."""
-    return not sys.stdout.isatty()
-
-
 def emit_json(data: Any) -> None:
     """Write a single JSON object/array to stdout. No rich, no color."""
     if hasattr(data, "__dataclass_fields__"):

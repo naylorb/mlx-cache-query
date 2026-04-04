@@ -24,17 +24,28 @@ from pathlib import Path
 
 import click
 
-from mcq.console import emit_json, emit_text, is_interactive, is_piped, status
+import re
+
+from mcq.console import emit_json, emit_text, is_interactive, status
 from mcq.core.constants import (
-    APP_DIR,
     ARTIFACTS_DIR,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     EXIT_BUILD_FAILED,
     EXIT_CACHE_NOT_FOUND,
-    EXIT_OK,
+    EXIT_QUERY_FAILED,
     REGISTRY_DB,
 )
+
+_VALID_NAME = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$')
+
+
+def _validate_name(name: str) -> None:
+    """Validate corpus name — alphanumeric, dashes, underscores, dots."""
+    if not _VALID_NAME.match(name):
+        status.print(f"[red]Error:[/red] Invalid name '{name}'. "
+                     "Use alphanumeric characters, dashes, underscores, or dots.")
+        raise SystemExit(1)
 
 
 def _ensure_dirs() -> None:
@@ -91,112 +102,127 @@ def build(ctx: click.Context, path: str, name: str, model: str, template: str) -
     from mcq.prefix.compiler import PrefixCompiler
 
     use_json = ctx.obj["json"]
+    _validate_name(name)
     source = Path(path).resolve()
     registry = CacheRegistry(REGISTRY_DB)
     store = CacheStore(ARTIFACTS_DIR)
 
-    # Stage 1: Ingest
-    with status.status("[bold]Ingesting..."):
-        t0 = time.perf_counter()
-        corpus = CorpusIngestor.ingest(source, name=name)
-        t_ingest = time.perf_counter() - t0
+    try:
+        # Stage 1: Ingest
+        with status.status("[bold]Ingesting..."):
+            t0 = time.perf_counter()
+            corpus = CorpusIngestor.ingest(source, name=name)
+            t_ingest = time.perf_counter() - t0
 
-    status.print(f"  {len(corpus.chunks)} files in {t_ingest:.2f}s")
+        status.print(f"  {len(corpus.chunks)} files in {t_ingest:.2f}s")
 
-    registry.register_corpus(
-        name=name,
-        source_path=str(source),
-        content_hash=corpus.content_hash,
-        chunk_count=len(corpus.chunks),
-    )
+        if not corpus.chunks:
+            status.print("[red]Error:[/red] No supported files found.")
+            raise SystemExit(EXIT_BUILD_FAILED)
 
-    # Stage 2: Load model + tokenize
-    with status.status(f"[bold]Loading model {model}..."):
-        t0 = time.perf_counter()
-        from huggingface_hub import snapshot_download
-        from mlx_lm import load
-        import mlx_lm
-
-        snapshot_download(model)
-        revision = "local"
-        try:
-            from huggingface_hub import model_info
-            info = model_info(model)
-            revision = info.sha
-        except Exception:
-            pass
-
-        mlx_model, tokenizer = load(model)
-        t_load = time.perf_counter() - t0
-
-    status.print(f"  Model loaded in {t_load:.2f}s")
-
-    with status.status("[bold]Tokenizing prefix..."):
-        t0 = time.perf_counter()
-        max_context = getattr(mlx_model, "max_position_embeddings", None) or getattr(
-            getattr(mlx_model, "config", None), "max_position_embeddings", 32768
+        registry.register_corpus(
+            name=name,
+            source_path=str(source),
+            content_hash=corpus.content_hash,
+            chunk_count=len(corpus.chunks),
         )
-        prefix = PrefixCompiler.compile(
-            corpus=corpus,
-            tokenizer=tokenizer,
-            model_id=model,
-            model_revision=revision,
-            max_context=max_context,
-            template=template,
-        )
-        t_tokenize = time.perf_counter() - t0
 
-    status.print(f"  {prefix.token_count} tokens in {t_tokenize:.2f}s")
+        # Stage 2: Load model + tokenize
+        with status.status(f"[bold]Loading model {model}..."):
+            t0 = time.perf_counter()
+            from huggingface_hub import snapshot_download
+            from mlx_lm import load
+            import mlx_lm
 
-    # Stage 3: Prefill KV cache
-    with status.status("[bold]Building KV cache..."):
-        t0 = time.perf_counter()
-        import mlx.core as mx
-        from mlx_lm.models.cache import make_prompt_cache
-        from mlx_lm.generate import generate_step
+            snapshot_download(model)
+            revision = "local"
+            try:
+                from huggingface_hub import model_info
+                info = model_info(model)
+                revision = info.sha
+            except Exception:
+                pass
 
-        prompt_cache = make_prompt_cache(mlx_model)
-        prompt_array = mx.array(prefix.tokens)
+            mlx_model, tokenizer = load(model)
+            t_load = time.perf_counter() - t0
 
-        for _ in generate_step(
-            prompt=prompt_array,
-            model=mlx_model,
-            max_tokens=0,
-            prompt_cache=prompt_cache,
-        ):
-            pass
+        status.print(f"  Model loaded in {t_load:.2f}s")
 
-        t_prefill = time.perf_counter() - t0
+        with status.status("[bold]Tokenizing prefix..."):
+            t0 = time.perf_counter()
+            max_context = getattr(mlx_model, "max_position_embeddings", None) or getattr(
+                getattr(mlx_model, "config", None), "max_position_embeddings", 32768
+            )
+            prefix = PrefixCompiler.compile(
+                corpus=corpus,
+                tokenizer=tokenizer,
+                model_id=model,
+                model_revision=revision,
+                max_context=max_context,
+                template=template,
+            )
+            t_tokenize = time.perf_counter() - t0
 
-    status.print(f"  Cache built in {t_prefill:.2f}s")
+        status.print(f"  {prefix.token_count} tokens in {t_tokenize:.2f}s")
 
-    # Stage 4: Save
-    with status.status("[bold]Saving artifact..."):
-        t0 = time.perf_counter()
-        ref = store.save(
-            cache=prompt_cache,
-            prefix=prefix,
-            corpus_name=name,
-            mlx_lm_version=mlx_lm.__version__,
-            registry=registry,
-        )
-        t_save = time.perf_counter() - t0
+        # Stage 3: Prefill KV cache
+        with status.status("[bold]Building KV cache..."):
+            t0 = time.perf_counter()
+            import mlx.core as mx
+            from mlx_lm.models.cache import make_prompt_cache
+            from mlx_lm.generate import generate_step
 
-    size_mb = ref.file_size_bytes / 1024 / 1024
-    total = t_ingest + t_tokenize + t_prefill + t_save
+            prompt_cache = make_prompt_cache(mlx_model)
+            prompt_array = mx.array(prefix.tokens)
 
-    if use_json:
-        emit_json({
-            "artifact_hash": ref.artifact_hash,
-            "corpus_name": name,
-            "model_id": ref.model_id,
-            "prefix_token_count": ref.prefix_token_count,
-            "file_size_bytes": ref.file_size_bytes,
-            "file_path": ref.file_path,
-            "build_time_s": round(total, 2),
-        })
-    else:
-        status.print(f"\n  {ref.artifact_hash[:16]}... ({size_mb:.1f} MB, {total:.1f}s)")
+            for _ in generate_step(
+                prompt=prompt_array,
+                model=mlx_model,
+                max_tokens=0,
+                prompt_cache=prompt_cache,
+            ):
+                pass
+
+            t_prefill = time.perf_counter() - t0
+
+        status.print(f"  Cache built in {t_prefill:.2f}s")
+
+        # Stage 4: Save
+        with status.status("[bold]Saving artifact..."):
+            t0 = time.perf_counter()
+            ref = store.save(
+                cache=prompt_cache,
+                prefix=prefix,
+                corpus_name=name,
+                mlx_lm_version=mlx_lm.__version__,
+                registry=registry,
+            )
+            t_save = time.perf_counter() - t0
+
+        size_mb = ref.file_size_bytes / 1024 / 1024
+        total = t_ingest + t_tokenize + t_prefill + t_save
+
+        if use_json:
+            emit_json({
+                "artifact_hash": ref.artifact_hash,
+                "corpus_name": name,
+                "model_id": ref.model_id,
+                "prefix_token_count": ref.prefix_token_count,
+                "file_size_bytes": ref.file_size_bytes,
+                "file_path": ref.file_path,
+                "build_time_s": round(total, 2),
+            })
+        else:
+            status.print(f"\n  {ref.artifact_hash[:16]}... ({size_mb:.1f} MB, {total:.1f}s)")
+
+    except SystemExit:
+        raise
+    except Exception as exc:
+        if use_json:
+            emit_json({"error": str(exc)})
+        else:
+            status.print(f"[red]Error:[/red] {exc}")
+        raise SystemExit(EXIT_BUILD_FAILED)
 
 
 # ── query ────────────────────────────────────────────────────────────
@@ -262,7 +288,7 @@ def query(
         question = sys.stdin.read().strip()
         if not question:
             status.print("[red]Error:[/red] No question on stdin.")
-            raise SystemExit(EXIT_CACHE_NOT_FOUND)
+            raise SystemExit(EXIT_QUERY_FAILED)
         _run_single_query(mlx_model, tokenizer, prompt_cache, question,
                           max_tokens, use_json, no_stream)
     else:
@@ -314,10 +340,10 @@ def _run_single_query(
             "tokens_per_sec": round(tps, 1),
             "tokens": token_count,
         })
-    elif no_stream:
-        emit_text(full_text, end="\n")
-        status.print(f"[dim]({token_count} tokens, {tps:.1f} tok/s, TTFT {ttft or 0:.0f}ms)[/dim]")
     else:
+        if no_stream:
+            emit_text(full_text)
+        # End the output line on stdout, then stats on stderr
         emit_text("", end="\n")
         status.print(f"[dim]({token_count} tokens, {tps:.1f} tok/s, TTFT {ttft or 0:.0f}ms)[/dim]")
 
@@ -523,7 +549,7 @@ def find(ctx: click.Context, name: str, query_text: str | None, top_k: int, cont
             query_text = sys.stdin.read().strip()
         if not query_text:
             status.print("[red]Error:[/red] No search query.")
-            raise SystemExit(1)
+            raise SystemExit(EXIT_QUERY_FAILED)
 
     with status.status("[bold]Searching..."):
         corpus = CorpusIngestor.ingest(Path(corpus_info["source_path"]), name=name)
