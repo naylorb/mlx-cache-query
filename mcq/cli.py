@@ -6,6 +6,7 @@ from pathlib import Path
 
 import click
 
+from mcq.console import emit_json, is_interactive, is_piped, output, status
 from mcq.core.constants import (
     APP_DIR,
     ARTIFACTS_DIR,
@@ -19,26 +20,46 @@ def _ensure_dirs() -> None:
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# ---------------------------------------------------------------------------
+# Group
+# ---------------------------------------------------------------------------
+
+
 @click.group()
-def main() -> None:
-    """mcq — local MLX prompt-cache query tool."""
+@click.option("--json", "use_json", is_flag=True, envvar="MCQ_JSON", help="Output JSON to stdout")
+@click.option("--quiet", "-q", is_flag=True, envvar="MCQ_QUIET", help="Suppress status output")
+@click.pass_context
+def main(ctx: click.Context, use_json: bool, quiet: bool) -> None:
+    """mcq \u2014 local MLX prompt-cache query tool."""
+    ctx.ensure_object(dict)
+    ctx.obj["json"] = use_json
+    ctx.obj["quiet"] = quiet
+    if quiet:
+        status.quiet = True
     _ensure_dirs()
+
+
+# ---------------------------------------------------------------------------
+# ingest
+# ---------------------------------------------------------------------------
 
 
 @main.command()
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--name", "-n", required=True, help="Corpus name for reference")
-def ingest(path: str, name: str) -> None:
+@click.pass_context
+def ingest(ctx: click.Context, path: str, name: str) -> None:
     """Ingest a file or directory into a corpus."""
     from mcq.cache.registry import CacheRegistry
     from mcq.ingest.ingestor import CorpusIngestor
+
+    use_json = ctx.obj["json"]
 
     source = Path(path).resolve()
     t0 = time.perf_counter()
     corpus = CorpusIngestor.ingest(source, name=name)
     elapsed = time.perf_counter() - t0
 
-    # Persist corpus registration
     registry = CacheRegistry(REGISTRY_DB)
     registry.register_corpus(
         name=name,
@@ -47,16 +68,31 @@ def ingest(path: str, name: str) -> None:
         chunk_count=len(corpus.chunks),
     )
 
-    click.echo(f"Corpus '{name}': {len(corpus.chunks)} files, hash={corpus.content_hash[:16]}...")
-    click.echo(f"Ingested in {elapsed:.2f}s")
-    click.echo(f"Content hash: {corpus.content_hash}")
-    click.echo(f"Source: {source}")
+    if use_json:
+        emit_json({
+            "name": name,
+            "hash": corpus.content_hash,
+            "chunks": len(corpus.chunks),
+            "source": str(source),
+            "elapsed_s": round(elapsed, 3),
+        })
+    else:
+        status.print(f"Corpus [bold]'{name}'[/bold]: {len(corpus.chunks)} files, hash={corpus.content_hash[:16]}...")
+        status.print(f"Ingested in {elapsed:.2f}s")
+        status.print(f"Content hash: {corpus.content_hash}")
+        status.print(f"Source: {source}")
+
+
+# ---------------------------------------------------------------------------
+# build
+# ---------------------------------------------------------------------------
 
 
 @main.command()
 @click.argument("name")
-@click.option("--model", "-m", default=DEFAULT_MODEL, help="Model ID", show_default=True)
-def build(name: str, model: str) -> None:
+@click.option("--model", "-m", default=DEFAULT_MODEL, envvar="MCQ_MODEL", help="Model ID", show_default=True)
+@click.pass_context
+def build(ctx: click.Context, name: str, model: str) -> None:
     """Build a KV cache artifact from a registered corpus."""
     from huggingface_hub import snapshot_download
     from mlx_lm import load
@@ -68,130 +104,188 @@ def build(name: str, model: str) -> None:
     from mcq.ingest.ingestor import CorpusIngestor
     from mcq.prefix.compiler import PrefixCompiler
 
+    use_json = ctx.obj["json"]
+
     # Look up registered corpus
     registry = CacheRegistry(REGISTRY_DB)
     corpus_info = registry.get_corpus(name)
     if not corpus_info:
-        click.echo(f"Corpus '{name}' not found. Run 'mcq ingest' first.")
-        sys.exit(1)
+        status.print(f"[red]Error:[/red] Corpus '{name}' not found. Run 'mcq ingest' first.")
+        raise SystemExit(1)
 
     corpus_path = corpus_info["source_path"]
 
-    # Re-ingest from source to get current content
-    click.echo(f"Ingesting '{corpus_path}'...")
-    t0 = time.perf_counter()
-    corpus = CorpusIngestor.ingest(Path(corpus_path), name=name)
-    t_ingest = time.perf_counter() - t0
-    click.echo(f"  {len(corpus.chunks)} files in {t_ingest:.2f}s")
+    # Re-ingest
+    with status.status("[bold]Ingesting corpus...") as spinner:
+        t0 = time.perf_counter()
+        corpus = CorpusIngestor.ingest(Path(corpus_path), name=name)
+        t_ingest = time.perf_counter() - t0
+        spinner.update(f"[bold]Ingested {len(corpus.chunks)} files in {t_ingest:.2f}s")
+
+    status.print(f"  {len(corpus.chunks)} files in {t_ingest:.2f}s")
 
     # Check for staleness
     if corpus.content_hash != corpus_info["content_hash"]:
-        click.echo(f"  Warning: corpus content has changed since registration. Updating.")
+        status.print("[yellow]  Warning: corpus content has changed since registration. Updating.[/yellow]")
         registry.register_corpus(name, corpus_path, corpus.content_hash, len(corpus.chunks))
 
     # Load model
-    click.echo(f"Loading model '{model}'...")
-    t0 = time.perf_counter()
-    model_path = snapshot_download(model)
-    revision = "local"
-    try:
-        # Try to get the revision from the snapshot info
-        from huggingface_hub import model_info
-        info = model_info(model)
-        revision = info.sha
-    except Exception:
-        pass
+    with status.status(f"[bold]Loading model '{model}'...") as spinner:
+        t0 = time.perf_counter()
+        model_path = snapshot_download(model)
+        revision = "local"
+        try:
+            from huggingface_hub import model_info
+            info = model_info(model)
+            revision = info.sha
+        except Exception:
+            pass
 
-    mlx_model, tokenizer = load(model)
-    t_load = time.perf_counter() - t0
-    click.echo(f"  Model loaded in {t_load:.2f}s")
+        mlx_model, tokenizer = load(model)
+        t_load = time.perf_counter() - t0
+        spinner.update(f"[bold]Model loaded in {t_load:.2f}s")
+
+    status.print(f"  Model loaded in {t_load:.2f}s")
 
     # Compile prefix
-    click.echo("Compiling prefix...")
-    t0 = time.perf_counter()
-    # Get model context window from config if available
-    max_context = getattr(mlx_model, "max_position_embeddings", None) or getattr(
-        getattr(mlx_model, "config", None), "max_position_embeddings", 32768
-    )
-    prefix = PrefixCompiler.compile(
-        corpus=corpus,
-        tokenizer=tokenizer,
-        model_id=model,
-        model_revision=revision,
-        max_context=max_context,
-    )
-    t_compile = time.perf_counter() - t0
-    click.echo(f"  {prefix.token_count} tokens in {t_compile:.2f}s (limit: {max_context - DEFAULT_QUERY_BUDGET})")
+    with status.status("[bold]Compiling prefix...") as spinner:
+        t0 = time.perf_counter()
+        max_context = getattr(mlx_model, "max_position_embeddings", None) or getattr(
+            getattr(mlx_model, "config", None), "max_position_embeddings", 32768
+        )
+        prefix = PrefixCompiler.compile(
+            corpus=corpus,
+            tokenizer=tokenizer,
+            model_id=model,
+            model_revision=revision,
+            max_context=max_context,
+        )
+        t_compile = time.perf_counter() - t0
+
+    status.print(f"  {prefix.token_count} tokens in {t_compile:.2f}s (limit: {max_context - DEFAULT_QUERY_BUDGET})")
 
     # Build cache
-    click.echo("Building KV cache (this may take a while)...")
-    t0 = time.perf_counter()
-    cache = CacheBuilder.build(prefix, mlx_model, tokenizer)
-    t_build = time.perf_counter() - t0
-    click.echo(f"  Cache built in {t_build:.2f}s")
+    with status.status("[bold]Building KV cache (this may take a while)...") as spinner:
+        t0 = time.perf_counter()
+        cache = CacheBuilder.build(prefix, mlx_model, tokenizer)
+        t_build = time.perf_counter() - t0
+
+    status.print(f"  Cache built in {t_build:.2f}s")
 
     # Save
-    click.echo("Saving artifact...")
-    t0 = time.perf_counter()
-    store = CacheStore(ARTIFACTS_DIR)
-    registry = CacheRegistry(REGISTRY_DB)
-    ref = store.save(
-        cache=cache,
-        prefix=prefix,
-        corpus_name=name,
-        mlx_lm_version=mlx_lm.__version__,
-        registry=registry,
-    )
-    t_save = time.perf_counter() - t0
-    click.echo(f"  Saved in {t_save:.2f}s ({ref.file_size_bytes / 1024 / 1024:.1f} MB)")
+    with status.status("[bold]Saving artifact...") as spinner:
+        t0 = time.perf_counter()
+        store = CacheStore(ARTIFACTS_DIR)
+        registry = CacheRegistry(REGISTRY_DB)
+        ref = store.save(
+            cache=cache,
+            prefix=prefix,
+            corpus_name=name,
+            mlx_lm_version=mlx_lm.__version__,
+            registry=registry,
+        )
+        t_save = time.perf_counter() - t0
 
-    click.echo(f"\nArtifact: {ref.artifact_hash[:16]}...")
-    click.echo(f"  Path: {ref.file_path}")
-    click.echo(f"  Tokens: {ref.prefix_token_count}")
-    click.echo(f"  Total build time: {t_ingest + t_compile + t_build + t_save:.2f}s (excl. model load)")
+    status.print(f"  Saved in {t_save:.2f}s ({ref.file_size_bytes / 1024 / 1024:.1f} MB)")
+
+    if use_json:
+        emit_json({
+            "artifact_hash": ref.artifact_hash,
+            "corpus_name": name,
+            "model_id": ref.model_id,
+            "prefix_token_count": ref.prefix_token_count,
+            "file_size_bytes": ref.file_size_bytes,
+            "file_path": ref.file_path,
+            "build_time_s": round(t_ingest + t_compile + t_build + t_save, 2),
+        })
+    else:
+        status.print(f"\nArtifact: {ref.artifact_hash[:16]}...")
+        status.print(f"  Path: {ref.file_path}")
+        status.print(f"  Tokens: {ref.prefix_token_count}")
+        status.print(f"  Total build time: {t_ingest + t_compile + t_build + t_save:.2f}s (excl. model load)")
 
 
-@main.command()
-@click.argument("name")
-@click.option("--model", "-m", default=DEFAULT_MODEL, help="Model ID", show_default=True)
-@click.option("--max-tokens", default=512, help="Max tokens to generate", show_default=True)
-def query(name: str, model: str, max_tokens: int) -> None:
-    """Interactive query against a cached corpus."""
-    from mlx_lm import load
+# ---------------------------------------------------------------------------
+# query helpers
+# ---------------------------------------------------------------------------
 
-    from mcq.cache.registry import CacheRegistry
-    from mcq.cache.store import CacheStore
+
+def _run_single_query(
+    mlx_model,
+    tokenizer,
+    prompt_cache: list,
+    question: str,
+    max_tokens: int,
+    use_json: bool,
+) -> None:
+    """Run a single query. Streams raw text to stdout, or emits JSON."""
+    import copy
+    import time as _time
+
     from mcq.inference.engine import QueryEngine
 
-    registry = CacheRegistry(REGISTRY_DB)
-    store = CacheStore(ARTIFACTS_DIR)
+    cache = copy.deepcopy(prompt_cache)
+    query_text = QueryEngine.format_query_prompt(question)
 
-    refs = registry.get_by_corpus_name(name, model_id=model)
-    if not refs:
-        click.echo(f"No cache found for corpus '{name}' with model '{model}'")
-        click.echo("Run 'mcq build' first.")
-        sys.exit(1)
+    from mlx_lm import stream_generate
 
-    ref = refs[0]  # most recent
-    click.echo(f"Loading model '{model}'...")
-    mlx_model, tokenizer = load(model)
+    t0 = _time.perf_counter()
+    ttft: float | None = None
+    chunks: list[str] = []
+    token_count = 0
 
-    click.echo(f"Loading cache ({ref.file_size_bytes / 1024 / 1024:.1f} MB)...")
-    t0 = time.perf_counter()
-    prompt_cache, _ = store.load(ref)
-    t_load = time.perf_counter() - t0
-    click.echo(f"  Cache loaded in {t_load:.3f}s")
-    click.echo(f"  Prefix: {ref.prefix_token_count} tokens")
-    click.echo()
+    for response in stream_generate(
+        mlx_model,
+        tokenizer,
+        prompt=query_text,
+        max_tokens=max_tokens,
+        prompt_cache=cache,
+    ):
+        if ttft is None:
+            ttft = (_time.perf_counter() - t0) * 1000
+        chunks.append(response.text)
+        token_count += 1
+        if not use_json:
+            sys.stdout.write(response.text)
+            sys.stdout.flush()
 
-    click.echo("Ready. Type your question (Ctrl+C to exit):")
+    total_s = _time.perf_counter() - t0
+    decode_tokens = max(token_count - 1, 1)
+    decode_time = total_s - (ttft / 1000 if ttft else 0)
+    tps = decode_tokens / max(decode_time, 0.001)
+
+    if use_json:
+        emit_json({
+            "text": "".join(chunks),
+            "ttft_ms": round(ttft or 0.0, 1),
+            "tokens_per_sec": round(tps, 1),
+            "tokens": token_count,
+        })
+    else:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        status.print(f"[dim]({token_count} tokens, {tps:.1f} tok/s, TTFT {ttft or 0:.0f}ms)[/dim]")
+
+
+def _run_interactive(
+    mlx_model,
+    tokenizer,
+    prompt_cache: list,
+    max_tokens: int,
+) -> None:
+    """Interactive REPL. Prompt on stderr, answers to stdout."""
+    from mcq.inference.engine import QueryEngine
+
+    status.print("[bold]Ready.[/bold] Type your question (Ctrl+C to exit):")
     while True:
         try:
-            question = click.prompt("Q", prompt_suffix="> ")
+            # Print prompt to stderr so it doesn't mix with piped output
+            status.print()
+            question = click.prompt("Q", prompt_suffix="> ", err=True)
             if not question.strip():
                 continue
 
-            click.echo("A> ", nl=False)
+            status.print("A> ", end="")
             for chunk in QueryEngine.stream_query(
                 model=mlx_model,
                 tokenizer=tokenizer,
@@ -199,81 +293,268 @@ def query(name: str, model: str, max_tokens: int) -> None:
                 question=question,
                 max_tokens=max_tokens,
             ):
-                click.echo(chunk, nl=False)
-            click.echo()
-            click.echo()
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+            sys.stdout.write("\n")
+            sys.stdout.flush()
         except (KeyboardInterrupt, EOFError):
-            click.echo("\nBye.")
+            status.print("\nBye.")
             break
 
 
-@main.command("list")
-def list_cmd() -> None:
-    """List all registered corpora and cached artifacts."""
-    from mcq.cache.registry import CacheRegistry
-
-    registry = CacheRegistry(REGISTRY_DB)
-    refs = registry.list_all()
-
-    if not refs:
-        click.echo("No cached artifacts found.")
-        return
-
-    for ref in refs:
-        size_mb = ref.file_size_bytes / 1024 / 1024
-        click.echo(
-            f"  {ref.corpus_name:20s}  model={ref.model_id:40s}  "
-            f"tokens={ref.prefix_token_count:6d}  size={size_mb:6.1f}MB  "
-            f"hash={ref.artifact_hash[:12]}..."
-        )
+# ---------------------------------------------------------------------------
+# query
+# ---------------------------------------------------------------------------
 
 
 @main.command()
 @click.argument("name")
-def info(name: str) -> None:
+@click.argument("question", required=False, default=None)
+@click.option("--model", "-m", default=DEFAULT_MODEL, envvar="MCQ_MODEL", help="Model ID", show_default=True)
+@click.option("--max-tokens", default=512, envvar="MCQ_MAX_TOKENS", help="Max tokens to generate", show_default=True)
+@click.pass_context
+def query(ctx: click.Context, name: str, question: str | None, model: str, max_tokens: int) -> None:
+    """Query against a cached corpus.
+
+    Supports three modes:
+
+    \b
+    1. One-shot:    mcq query myproject "What does auth do?"
+    2. Piped:       echo "question" | mcq query myproject
+    3. Interactive:  mcq query myproject
+    """
+    from mlx_lm import load
+
+    from mcq.cache.registry import CacheRegistry
+    from mcq.cache.store import CacheStore
+
+    use_json = ctx.obj["json"]
+
+    registry = CacheRegistry(REGISTRY_DB)
+    store = CacheStore(ARTIFACTS_DIR)
+
+    refs = registry.get_by_corpus_name(name, model_id=model)
+    if not refs:
+        status.print(f"[red]Error:[/red] No cache found for corpus '{name}' with model '{model}'")
+        status.print("Run 'mcq build' first.")
+        raise SystemExit(1)
+
+    ref = refs[0]  # most recent
+
+    with status.status(f"[bold]Loading model '{model}'..."):
+        mlx_model, tokenizer = load(model)
+
+    with status.status(f"[bold]Loading cache ({ref.file_size_bytes / 1024 / 1024:.1f} MB)..."):
+        t0 = time.perf_counter()
+        prompt_cache, _ = store.load(ref)
+        t_load = time.perf_counter() - t0
+
+    status.print(f"Cache loaded in {t_load:.3f}s ({ref.prefix_token_count} prefix tokens)")
+
+    if question:
+        # One-shot mode
+        _run_single_query(mlx_model, tokenizer, prompt_cache, question, max_tokens, use_json)
+    elif not is_interactive():
+        # Pipe mode -- read from stdin
+        question = sys.stdin.read().strip()
+        if not question:
+            status.print("[red]Error:[/red] No question provided on stdin.")
+            raise SystemExit(1)
+        _run_single_query(mlx_model, tokenizer, prompt_cache, question, max_tokens, use_json)
+    else:
+        # Interactive REPL
+        _run_interactive(mlx_model, tokenizer, prompt_cache, max_tokens)
+
+
+# ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
+
+
+@main.command("list")
+@click.pass_context
+def list_cmd(ctx: click.Context) -> None:
+    """List all registered corpora and cached artifacts."""
+    from mcq.cache.registry import CacheRegistry
+
+    use_json = ctx.obj["json"]
+    registry = CacheRegistry(REGISTRY_DB)
+
+    corpora = registry.list_corpora()
+    refs = registry.list_all()
+
+    # Build a set of corpus names that have cache artifacts
+    cached_names = {r.corpus_name for r in refs}
+
+    if use_json:
+        rows = []
+        # Include ingested-only corpora
+        for c in corpora:
+            name = c["name"]
+            if name not in cached_names:
+                rows.append({
+                    "corpus": name,
+                    "status": "ingested",
+                    "source": c["source_path"],
+                    "chunks": c["chunk_count"],
+                })
+        # Include cached artifacts
+        for ref in refs:
+            rows.append({
+                "corpus": ref.corpus_name,
+                "status": "cached",
+                "model": ref.model_id,
+                "tokens": ref.prefix_token_count,
+                "size_bytes": ref.file_size_bytes,
+                "artifact_hash": ref.artifact_hash,
+                "built": ref.build_timestamp,
+            })
+        emit_json(rows)
+        return
+
+    if not corpora and not refs:
+        status.print("No corpora or cached artifacts found.")
+        return
+
+    from rich.table import Table
+
+    table = Table(title="Corpora & Artifacts")
+    table.add_column("Corpus", style="bold")
+    table.add_column("Status")
+    table.add_column("Model")
+    table.add_column("Tokens", justify="right")
+    table.add_column("Size", justify="right")
+    table.add_column("Built")
+
+    # Show ingested-only corpora first
+    for c in corpora:
+        name = c["name"]
+        if name not in cached_names:
+            table.add_row(
+                name,
+                "[yellow]ingested[/yellow]",
+                "-",
+                "-",
+                "-",
+                "-",
+            )
+
+    # Show cached artifacts
+    for ref in refs:
+        size_mb = ref.file_size_bytes / 1024 / 1024
+        table.add_row(
+            ref.corpus_name,
+            "[green]cached[/green]",
+            ref.model_id,
+            str(ref.prefix_token_count),
+            f"{size_mb:.1f} MB",
+            ref.build_timestamp,
+        )
+
+    output.print(table)
+
+
+# ---------------------------------------------------------------------------
+# info
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("name")
+@click.pass_context
+def info(ctx: click.Context, name: str) -> None:
     """Show details for a corpus and its cache artifacts."""
     from mcq.cache.registry import CacheRegistry
 
+    use_json = ctx.obj["json"]
     registry = CacheRegistry(REGISTRY_DB)
     refs = registry.get_by_corpus_name(name)
 
     if not refs:
-        click.echo(f"No artifacts found for corpus '{name}'.")
+        status.print(f"[red]Error:[/red] No artifacts found for corpus '{name}'.")
+        raise SystemExit(1)
+
+    if use_json:
+        emit_json([
+            {
+                "artifact_hash": r.artifact_hash,
+                "model_id": r.model_id,
+                "model_revision": r.model_revision,
+                "corpus_hash": r.corpus_hash,
+                "corpus_name": r.corpus_name,
+                "prefix_token_count": r.prefix_token_count,
+                "prompt_template_version": r.prompt_template_version,
+                "normalization_version": r.normalization_version,
+                "build_timestamp": r.build_timestamp,
+                "file_size_bytes": r.file_size_bytes,
+                "file_path": r.file_path,
+                "mlx_lm_version": r.mlx_lm_version,
+            }
+            for r in refs
+        ])
         return
 
+    from rich.panel import Panel
+    from rich.text import Text
+
     for ref in refs:
-        click.echo(f"Corpus: {ref.corpus_name}")
-        click.echo(f"  Artifact hash:    {ref.artifact_hash}")
-        click.echo(f"  Model:            {ref.model_id}")
-        click.echo(f"  Model revision:   {ref.model_revision}")
-        click.echo(f"  Corpus hash:      {ref.corpus_hash}")
-        click.echo(f"  Prefix tokens:    {ref.prefix_token_count}")
-        click.echo(f"  Template version: {ref.prompt_template_version}")
-        click.echo(f"  File size:        {ref.file_size_bytes / 1024 / 1024:.1f} MB")
-        click.echo(f"  File path:        {ref.file_path}")
-        click.echo(f"  Built:            {ref.build_timestamp}")
-        click.echo(f"  mlx-lm version:   {ref.mlx_lm_version}")
-        click.echo()
+        size_mb = ref.file_size_bytes / 1024 / 1024
+        body = Text()
+        body.append("Artifact hash:    ", style="bold")
+        body.append(f"{ref.artifact_hash}\n")
+        body.append("Model:            ", style="bold")
+        body.append(f"{ref.model_id}\n")
+        body.append("Model revision:   ", style="bold")
+        body.append(f"{ref.model_revision}\n")
+        body.append("Corpus hash:      ", style="bold")
+        body.append(f"{ref.corpus_hash}\n")
+        body.append("Prefix tokens:    ", style="bold")
+        body.append(f"{ref.prefix_token_count}\n")
+        body.append("Template version: ", style="bold")
+        body.append(f"{ref.prompt_template_version}\n")
+        body.append("File size:        ", style="bold")
+        body.append(f"{size_mb:.1f} MB\n")
+        body.append("File path:        ", style="bold")
+        body.append(f"{ref.file_path}\n")
+        body.append("Built:            ", style="bold")
+        body.append(f"{ref.build_timestamp}\n")
+        body.append("mlx-lm version:   ", style="bold")
+        body.append(ref.mlx_lm_version)
+
+        panel = Panel(body, title=f"[bold]{ref.corpus_name}[/bold]", border_style="blue")
+        output.print(panel)
+
+
+# ---------------------------------------------------------------------------
+# delete
+# ---------------------------------------------------------------------------
 
 
 @main.command()
 @click.argument("name")
 @click.option("--cache-only", is_flag=True, help="Delete only cache artifacts, keep corpus registration")
-def delete(name: str, cache_only: bool) -> None:
+@click.pass_context
+def delete(ctx: click.Context, name: str, cache_only: bool) -> None:
     """Delete a corpus and its cache artifacts."""
     from mcq.cache.registry import CacheRegistry
     from mcq.cache.store import CacheStore
 
+    use_json = ctx.obj["json"]
     registry = CacheRegistry(REGISTRY_DB)
     store = CacheStore(ARTIFACTS_DIR)
     refs = registry.get_by_corpus_name(name)
 
     if not refs:
-        click.echo(f"No artifacts found for corpus '{name}'.")
-        return
+        status.print(f"[red]Error:[/red] No artifacts found for corpus '{name}'.")
+        raise SystemExit(1)
 
+    deleted = []
     for ref in refs:
         store.delete(ref, registry)
-        click.echo(f"Deleted: {ref.artifact_hash[:16]}... ({ref.model_id})")
+        deleted.append(ref.artifact_hash)
+        status.print(f"Deleted: {ref.artifact_hash[:16]}... ({ref.model_id})")
 
-    click.echo(f"Removed {len(refs)} artifact(s).")
+    if use_json:
+        emit_json({"corpus": name, "deleted": deleted, "count": len(deleted)})
+    else:
+        status.print(f"Removed {len(refs)} artifact(s).")
