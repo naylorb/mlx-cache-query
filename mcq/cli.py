@@ -689,8 +689,21 @@ def find(ctx: click.Context, name: str, query: str | None, top_k: int, content: 
         if not is_interactive():
             query = sys.stdin.read().strip()
         if not query:
-            status.print("[red]Error:[/red] No search query provided.")
-            raise SystemExit(1)
+            # Interactive mode — launch TUI if available
+            if is_interactive() and not use_json:
+                try:
+                    from mcq.tui.finder import run_finder_tui
+                    corpus = CorpusIngestor.ingest(Path(corpus_info["source_path"]), name=name)
+                    selected = run_finder_tui(corpus, name)
+                    if selected:
+                        output.print(selected)
+                    return
+                except ImportError:
+                    status.print("[red]Error:[/red] No search query. Install textual for interactive mode: pip install textual")
+                    raise SystemExit(1)
+            else:
+                status.print("[red]Error:[/red] No search query provided.")
+                raise SystemExit(1)
 
     with status.status("[bold]Searching..."):
         corpus = CorpusIngestor.ingest(Path(corpus_info["source_path"]), name=name)
@@ -809,3 +822,207 @@ def serve(ctx: click.Context, port: int, host: str) -> None:
     status.print(f"Starting mcq API server on [bold]http://{host}:{port}[/bold]")
     status.print("Press Ctrl+C to stop.\n")
     uvicorn.run(create_app(), host=host, port=port, log_level="info")
+
+
+# ---------------------------------------------------------------------------
+# stats
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("name")
+@click.pass_context
+def stats(ctx: click.Context, name: str) -> None:
+    """Show corpus statistics — files, words, lines, extensions."""
+    from mcq.cache.registry import CacheRegistry
+    from mcq.core.stats import CorpusStats
+    from mcq.ingest.ingestor import CorpusIngestor
+
+    use_json = ctx.obj["json"]
+    registry = CacheRegistry(REGISTRY_DB)
+    corpus_info = registry.get_corpus(name)
+
+    if not corpus_info:
+        status.print(f"[red]Error:[/red] Corpus '{name}' not found.")
+        raise SystemExit(1)
+
+    corpus = CorpusIngestor.ingest(Path(corpus_info["source_path"]), name=name)
+    s = CorpusStats.from_corpus(corpus)
+
+    if use_json:
+        emit_json({
+            "name": s.name,
+            "total_files": s.total_files,
+            "total_bytes": s.total_bytes,
+            "total_lines": s.total_lines,
+            "total_words": s.total_words,
+            "extensions": s.extensions,
+            "largest_file": s.largest_file,
+            "largest_file_bytes": s.largest_file_bytes,
+        })
+    else:
+        from rich.panel import Panel
+        from rich.text import Text
+
+        body = Text()
+        body.append(f"Files:          ", style="bold")
+        body.append(f"{s.total_files}\n")
+        body.append(f"Total bytes:    ", style="bold")
+        body.append(f"{s.total_bytes:,}\n")
+        body.append(f"Total lines:    ", style="bold")
+        body.append(f"{s.total_lines:,}\n")
+        body.append(f"Total words:    ", style="bold")
+        body.append(f"{s.total_words:,}\n")
+        body.append(f"Largest file:   ", style="bold")
+        body.append(f"{s.largest_file} ({s.largest_file_bytes:,} bytes)\n")
+        body.append(f"\nExtensions:\n", style="bold")
+        for ext, count in s.extensions.items():
+            body.append(f"  {ext:10s}  {count} files\n")
+
+        panel = Panel(body, title=f"[bold]{s.name}[/bold]", border_style="blue")
+        output.print(panel)
+
+
+# ---------------------------------------------------------------------------
+# export
+# ---------------------------------------------------------------------------
+
+
+@main.command("export")
+@click.argument("name")
+@click.option("--format", "-f", "fmt", default="markdown",
+              type=click.Choice(["markdown", "json", "context", "filelist"]),
+              help="Export format")
+@click.pass_context
+def export_cmd(ctx: click.Context, name: str, fmt: str) -> None:
+    """Export corpus content for piping to other tools.
+
+    \b
+    Formats:
+      markdown  — concatenated markdown document
+      json      — structured JSON with all metadata
+      context   — prompt template format (paste into any LLM)
+      filelist  — one file path per line
+
+    \b
+    Examples:
+      mcq export myproject --format context | pbcopy
+      mcq export myproject --format filelist | xargs cat
+      mcq export myproject --format json | jq '.chunks | length'
+    """
+    from mcq.cache.registry import CacheRegistry
+    from mcq.export.exporter import CorpusExporter
+    from mcq.ingest.ingestor import CorpusIngestor
+
+    registry = CacheRegistry(REGISTRY_DB)
+    corpus_info = registry.get_corpus(name)
+
+    if not corpus_info:
+        status.print(f"[red]Error:[/red] Corpus '{name}' not found.")
+        raise SystemExit(1)
+
+    corpus = CorpusIngestor.ingest(Path(corpus_info["source_path"]), name=name)
+
+    exporters = {
+        "markdown": CorpusExporter.to_markdown,
+        "json": CorpusExporter.to_json,
+        "context": CorpusExporter.to_context,
+        "filelist": CorpusExporter.to_filelist,
+    }
+    result = exporters[fmt](corpus)
+    sys.stdout.write(result)
+    sys.stdout.flush()
+
+
+# ---------------------------------------------------------------------------
+# chat
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("name")
+@click.option("--model", "-m", default=DEFAULT_MODEL, envvar="MCQ_MODEL", help="Model ID", show_default=True)
+@click.option("--max-tokens", default=512, envvar="MCQ_MAX_TOKENS", help="Max tokens per response", show_default=True)
+@click.pass_context
+def chat(ctx: click.Context, name: str, model: str, max_tokens: int) -> None:
+    """Rich interactive chat against a cached corpus.
+
+    Like 'query' but with markdown-rendered responses, conversation history
+    display, and timing stats. Designed for extended research sessions.
+
+    \b
+    Example: mcq chat myproject
+    """
+    from mlx_lm import load
+
+    from mcq.cache.registry import CacheRegistry
+    from mcq.cache.store import CacheStore
+    from mcq.inference.engine import QueryEngine
+
+    registry = CacheRegistry(REGISTRY_DB)
+    store = CacheStore(ARTIFACTS_DIR)
+
+    refs = registry.get_by_corpus_name(name, model_id=model)
+    if not refs:
+        status.print(f"[red]Error:[/red] No cache for '{name}' with model '{model}'")
+        raise SystemExit(1)
+
+    ref = refs[0]
+
+    with status.status(f"[bold]Loading model '{model}'..."):
+        mlx_model, tokenizer = load(model)
+
+    with status.status(f"[bold]Loading cache ({ref.file_size_bytes / 1024 / 1024:.1f} MB)..."):
+        prompt_cache, _ = store.load(ref)
+
+    status.print()
+    from rich.panel import Panel
+    from rich.markdown import Markdown
+
+    output.print(Panel(
+        f"[bold]{name}[/bold] · {ref.prefix_token_count} tokens · {model}\n"
+        f"Type your questions. Use /quit to exit, /stats for metrics.",
+        title="mcq chat",
+        border_style="green",
+    ))
+    output.print()
+
+    query_count = 0
+    total_tokens = 0
+
+    while True:
+        try:
+            status.print("[bold green]You:[/bold green] ", end="")
+            question = input()
+            if not question.strip():
+                continue
+            if question.strip() in ("/quit", "/exit", "/q"):
+                break
+            if question.strip() == "/stats":
+                status.print(f"  Queries: {query_count}  Total tokens: {total_tokens}")
+                continue
+
+            query_count += 1
+            result = QueryEngine.query(
+                model=mlx_model,
+                tokenizer=tokenizer,
+                prompt_cache=prompt_cache,
+                question=question,
+                max_tokens=max_tokens,
+            )
+            total_tokens += result.total_tokens
+
+            output.print()
+            output.print(Panel(
+                Markdown(result.text),
+                title="[bold blue]mcq[/bold blue]",
+                subtitle=f"[dim]{result.total_tokens} tokens · {result.decode_tokens_per_sec:.0f} tok/s · TTFT {result.ttft_ms:.0f}ms[/dim]",
+                border_style="blue",
+            ))
+            output.print()
+
+        except (KeyboardInterrupt, EOFError):
+            break
+
+    status.print(f"\n[dim]Session: {query_count} queries, {total_tokens} tokens[/dim]")
+    status.print("Bye.")

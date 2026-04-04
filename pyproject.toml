@@ -26,6 +26,12 @@ api = [
     "fastapi>=0.100",
     "uvicorn>=0.20",
 ]
+tui = [
+    "textual>=0.40",
+]
+all = [
+    "mlx-cache-query[api,tui]",
+]
 
 [project.scripts]
 mcq = "mcq.cli:main"

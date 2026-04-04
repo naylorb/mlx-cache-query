@@ -107,4 +107,66 @@ def create_app() -> FastAPI:
             for r in results
         ]
 
+    @app.post("/query/{corpus_name}")
+    async def query_corpus(
+        corpus_name: str,
+        question: str = Query(...),
+        model: str = Query(default="mlx-community/Qwen2.5-3B-Instruct-4bit"),
+        max_tokens: int = Query(default=512),
+    ):
+        """Query a cached corpus. Returns the full answer."""
+        from mcq.cache.registry import CacheRegistry
+        registry = CacheRegistry(REGISTRY_DB)
+        refs = registry.get_by_corpus_name(corpus_name, model_id=model)
+        if not refs:
+            raise HTTPException(status_code=404, detail=f"No cache for corpus '{corpus_name}' with model '{model}'")
+
+        try:
+            from mcq.cache.store import CacheStore
+            from mcq.inference.engine import QueryEngine
+            from mlx_lm import load
+
+            ref = refs[0]
+            store = CacheStore(ARTIFACTS_DIR)
+            mlx_model, tokenizer = load(model)
+            prompt_cache, _ = store.load(ref)
+            result = QueryEngine.query(mlx_model, tokenizer, prompt_cache, question, max_tokens=max_tokens)
+            return {
+                "text": result.text,
+                "ttft_ms": round(result.ttft_ms, 1),
+                "tokens_per_sec": round(result.decode_tokens_per_sec, 1),
+                "total_tokens": result.total_tokens,
+            }
+        except ImportError:
+            raise HTTPException(status_code=503, detail="mlx not available — query requires Apple Silicon")
+
+    @app.get("/export/{corpus_name}")
+    async def export_corpus(
+        corpus_name: str,
+        format: str = Query(default="markdown", enum=["markdown", "json", "context", "filelist"]),
+    ):
+        """Export corpus content in various formats."""
+        from mcq.cache.registry import CacheRegistry
+        from mcq.ingest.ingestor import CorpusIngestor
+        from mcq.export.exporter import CorpusExporter
+
+        registry = CacheRegistry(REGISTRY_DB)
+        corpus_info = registry.get_corpus(corpus_name)
+        if not corpus_info:
+            raise HTTPException(status_code=404, detail=f"Corpus '{corpus_name}' not found")
+
+        corpus = CorpusIngestor.ingest(Path(corpus_info["source_path"]), name=corpus_name)
+
+        exporters = {
+            "markdown": CorpusExporter.to_markdown,
+            "json": CorpusExporter.to_json,
+            "context": CorpusExporter.to_context,
+            "filelist": CorpusExporter.to_filelist,
+        }
+        content = exporters[format](corpus)
+
+        media_type = "application/json" if format == "json" else "text/plain"
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(content=content, media_type=media_type)
+
     return app
