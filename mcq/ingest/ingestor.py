@@ -3,8 +3,8 @@ from __future__ import annotations
 import fnmatch
 from pathlib import Path
 
-from app.core.constants import SUPPORTED_EXTENSIONS
-from app.core.types import Corpus, CorpusChunk
+from mcq.core.constants import SUPPORTED_EXTENSIONS
+from mcq.core.types import Corpus, CorpusChunk
 
 
 class CorpusIngestor:

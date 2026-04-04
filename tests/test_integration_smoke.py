@@ -26,12 +26,12 @@ def test_full_pipeline_smoke(tmp_path: Path):
     import mlx_lm
     from huggingface_hub import model_info
 
-    from app.cache.builder import CacheBuilder
-    from app.cache.registry import CacheRegistry
-    from app.cache.store import CacheStore
-    from app.ingest.ingestor import CorpusIngestor
-    from app.inference.engine import QueryEngine
-    from app.prefix.compiler import PrefixCompiler
+    from mcq.cache.builder import CacheBuilder
+    from mcq.cache.registry import CacheRegistry
+    from mcq.cache.store import CacheStore
+    from mcq.ingest.ingestor import CorpusIngestor
+    from mcq.inference.engine import QueryEngine
+    from mcq.prefix.compiler import PrefixCompiler
 
     # Create test corpus
     corpus_dir = tmp_path / "corpus"

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import click
 
-from app.core.constants import (
+from mcq.core.constants import (
     APP_DIR,
     ARTIFACTS_DIR,
     DEFAULT_MODEL,
@@ -30,8 +30,8 @@ def main() -> None:
 @click.option("--name", "-n", required=True, help="Corpus name for reference")
 def ingest(path: str, name: str) -> None:
     """Ingest a file or directory into a corpus."""
-    from app.cache.registry import CacheRegistry
-    from app.ingest.ingestor import CorpusIngestor
+    from mcq.cache.registry import CacheRegistry
+    from mcq.ingest.ingestor import CorpusIngestor
 
     source = Path(path).resolve()
     t0 = time.perf_counter()
@@ -62,11 +62,11 @@ def build(name: str, model: str) -> None:
     from mlx_lm import load
     import mlx_lm
 
-    from app.cache.builder import CacheBuilder
-    from app.cache.registry import CacheRegistry
-    from app.cache.store import CacheStore
-    from app.ingest.ingestor import CorpusIngestor
-    from app.prefix.compiler import PrefixCompiler
+    from mcq.cache.builder import CacheBuilder
+    from mcq.cache.registry import CacheRegistry
+    from mcq.cache.store import CacheStore
+    from mcq.ingest.ingestor import CorpusIngestor
+    from mcq.prefix.compiler import PrefixCompiler
 
     # Look up registered corpus
     registry = CacheRegistry(REGISTRY_DB)
@@ -159,9 +159,9 @@ def query(name: str, model: str, max_tokens: int) -> None:
     """Interactive query against a cached corpus."""
     from mlx_lm import load
 
-    from app.cache.registry import CacheRegistry
-    from app.cache.store import CacheStore
-    from app.inference.engine import QueryEngine
+    from mcq.cache.registry import CacheRegistry
+    from mcq.cache.store import CacheStore
+    from mcq.inference.engine import QueryEngine
 
     registry = CacheRegistry(REGISTRY_DB)
     store = CacheStore(ARTIFACTS_DIR)
@@ -210,7 +210,7 @@ def query(name: str, model: str, max_tokens: int) -> None:
 @main.command("list")
 def list_cmd() -> None:
     """List all registered corpora and cached artifacts."""
-    from app.cache.registry import CacheRegistry
+    from mcq.cache.registry import CacheRegistry
 
     registry = CacheRegistry(REGISTRY_DB)
     refs = registry.list_all()
@@ -232,7 +232,7 @@ def list_cmd() -> None:
 @click.argument("name")
 def info(name: str) -> None:
     """Show details for a corpus and its cache artifacts."""
-    from app.cache.registry import CacheRegistry
+    from mcq.cache.registry import CacheRegistry
 
     registry = CacheRegistry(REGISTRY_DB)
     refs = registry.get_by_corpus_name(name)
@@ -261,8 +261,8 @@ def info(name: str) -> None:
 @click.option("--cache-only", is_flag=True, help="Delete only cache artifacts, keep corpus registration")
 def delete(name: str, cache_only: bool) -> None:
     """Delete a corpus and its cache artifacts."""
-    from app.cache.registry import CacheRegistry
-    from app.cache.store import CacheStore
+    from mcq.cache.registry import CacheRegistry
+    from mcq.cache.store import CacheStore
 
     registry = CacheRegistry(REGISTRY_DB)
     store = CacheStore(ARTIFACTS_DIR)

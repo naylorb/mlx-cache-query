@@ -22,10 +22,10 @@ dev = [
 ]
 
 [project.scripts]
-mcq = "app.cli:main"
+mcq = "mcq.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["app*"]
+include = ["mcq*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,7 +1,7 @@
 import time
 from unittest.mock import MagicMock, patch
 
-from app.inference.engine import QueryEngine, QueryResult
+from mcq.inference.engine import QueryEngine, QueryResult
 
 
 def test_query_result_fields():

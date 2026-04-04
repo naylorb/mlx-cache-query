@@ -1,9 +1,9 @@
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from app.cache.store import CacheStore
-from app.cache.registry import CacheRegistry
-from app.core.types import ArtifactRef, TokenizedPrefix
+from mcq.cache.store import CacheStore
+from mcq.cache.registry import CacheRegistry
+from mcq.core.types import ArtifactRef, TokenizedPrefix
 
 
 def _make_prefix() -> TokenizedPrefix:
@@ -38,8 +38,8 @@ def test_save_and_load_roundtrip(tmp_path: Path):
         """Mock save that creates a real file so stat() works."""
         Path(path).write_bytes(b"fake-cache-data")
 
-    with patch("app.cache.store.save_prompt_cache", side_effect=fake_save) as mock_save, \
-         patch("app.cache.store.load_prompt_cache") as mock_load:
+    with patch("mcq.cache.store.save_prompt_cache", side_effect=fake_save) as mock_save, \
+         patch("mcq.cache.store.load_prompt_cache") as mock_load:
         mock_load.return_value = (fake_cache, metadata)
 
         ref = store.save(

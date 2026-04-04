@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from app.cache.registry import CacheRegistry
-from app.core.types import ArtifactRef
+from mcq.cache.registry import CacheRegistry
+from mcq.core.types import ArtifactRef
 
 
 def _make_ref(**overrides) -> ArtifactRef:

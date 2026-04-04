@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from app.core.constants import DEFAULT_QUERY_BUDGET, PROMPT_TEMPLATE_VERSION
-from app.core.types import Corpus, TokenizedPrefix
+from mcq.core.constants import DEFAULT_QUERY_BUDGET, PROMPT_TEMPLATE_VERSION
+from mcq.core.types import Corpus, TokenizedPrefix
 
 
 class PrefixCompiler:

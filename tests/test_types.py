@@ -1,4 +1,4 @@
-from app.core.types import CorpusChunk, Corpus, TokenizedPrefix, ArtifactRef
+from mcq.core.types import CorpusChunk, Corpus, TokenizedPrefix, ArtifactRef
 
 
 def test_corpus_chunk_creation():

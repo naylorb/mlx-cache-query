@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock
 
-from app.core.types import Corpus, CorpusChunk, TokenizedPrefix
-from app.prefix.compiler import PrefixCompiler
+from mcq.core.types import Corpus, CorpusChunk, TokenizedPrefix
+from mcq.prefix.compiler import PrefixCompiler
 
 
 def _make_corpus() -> Corpus:

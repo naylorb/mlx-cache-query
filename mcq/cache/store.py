@@ -5,16 +5,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # DEVIATION: Lazy import to allow unit tests to run without mlx-lm installed.
-# Tests mock these names via patch("app.cache.store.save_prompt_cache", ...).
+# Tests mock these names via patch("mcq.cache.store.save_prompt_cache", ...).
 try:
     from mlx_lm.models.cache import load_prompt_cache, save_prompt_cache
 except ImportError:
     load_prompt_cache = None  # type: ignore[assignment]
     save_prompt_cache = None  # type: ignore[assignment]
 
-from app.cache.registry import CacheRegistry
-from app.core.constants import NORMALIZATION_VERSION, PROMPT_TEMPLATE_VERSION
-from app.core.types import ArtifactRef, TokenizedPrefix
+from mcq.cache.registry import CacheRegistry
+from mcq.core.constants import NORMALIZATION_VERSION, PROMPT_TEMPLATE_VERSION
+from mcq.core.types import ArtifactRef, TokenizedPrefix
 
 
 class CacheStore:

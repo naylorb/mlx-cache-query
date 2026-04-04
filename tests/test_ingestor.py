@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from app.core.types import Corpus
-from app.ingest.ingestor import CorpusIngestor
+from mcq.core.types import Corpus
+from mcq.ingest.ingestor import CorpusIngestor
 
 
 def test_ingest_single_file(tmp_path: Path):

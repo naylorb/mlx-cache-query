@@ -1,4 +1,4 @@
-from app.core.hashing import sha256_hex, artifact_hash_from_prefix
+from mcq.core.hashing import sha256_hex, artifact_hash_from_prefix
 
 
 def test_sha256_hex_bytes():
