@@ -1,4 +1,4 @@
-from mcq.core.hashing import sha256_hex, artifact_hash_from_prefix
+from mcq.core.hashing import sha256_hex, file_content_hash
 
 
 def test_sha256_hex_bytes():
@@ -15,24 +15,24 @@ def test_sha256_hex_different_inputs():
     assert sha256_hex(b"a") != sha256_hex(b"b")
 
 
-def test_artifact_hash_from_prefix():
-    h = artifact_hash_from_prefix(model_revision="rev123", prefix_tokens=[1, 2, 3])
+def test_file_content_hash():
+    h = file_content_hash("readme.md", "hello world")
     assert len(h) == 64
 
 
-def test_artifact_hash_determinism():
-    a = artifact_hash_from_prefix("rev", [10, 20])
-    b = artifact_hash_from_prefix("rev", [10, 20])
+def test_file_content_hash_deterministic():
+    a = file_content_hash("a.py", "content")
+    b = file_content_hash("a.py", "content")
     assert a == b
 
 
-def test_artifact_hash_changes_with_revision():
-    a = artifact_hash_from_prefix("rev1", [10, 20])
-    b = artifact_hash_from_prefix("rev2", [10, 20])
+def test_file_content_hash_changes_with_path():
+    a = file_content_hash("a.py", "content")
+    b = file_content_hash("b.py", "content")
     assert a != b
 
 
-def test_artifact_hash_changes_with_tokens():
-    a = artifact_hash_from_prefix("rev", [10, 20])
-    b = artifact_hash_from_prefix("rev", [10, 21])
+def test_file_content_hash_changes_with_content():
+    a = file_content_hash("a.py", "content1")
+    b = file_content_hash("a.py", "content2")
     assert a != b

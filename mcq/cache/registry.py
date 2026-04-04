@@ -1,3 +1,9 @@
+"""SQLite registry for corpora and cache artifacts.
+
+This is the metadata index — the "git index" of mcq.
+Every build and ingest registers here. Queries look up cache
+artifacts by corpus name.
+"""
 from __future__ import annotations
 
 import sqlite3
@@ -30,7 +36,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 """
 
-_COLUMNS = (
+_ARTIFACT_COLS = (
     "artifact_hash", "model_id", "model_revision", "corpus_hash",
     "corpus_name", "prefix_token_count", "prompt_template_version",
     "normalization_version", "build_timestamp", "file_size_bytes",
@@ -44,78 +50,77 @@ class CacheRegistry:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.execute("PRAGMA journal_mode=WAL")
-        # DEVIATION: use executescript() instead of execute() because _SCHEMA
-        # contains multiple statements and execute() only runs the first one.
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+
+    # ── Corpora ──────────────────────────────────────────────────────
 
     def register_corpus(
         self, name: str, source_path: str, content_hash: str, chunk_count: int
     ) -> None:
         from datetime import datetime, timezone
         self._conn.execute(
-            "INSERT OR REPLACE INTO corpora (name, source_path, content_hash, chunk_count, registered_at) "
+            "INSERT OR REPLACE INTO corpora "
+            "(name, source_path, content_hash, chunk_count, registered_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (name, source_path, content_hash, chunk_count, datetime.now(timezone.utc).isoformat()),
+            (name, source_path, content_hash, chunk_count,
+             datetime.now(timezone.utc).isoformat()),
         )
         self._conn.commit()
 
     def get_corpus(self, name: str) -> dict | None:
+        cols = ("name", "source_path", "content_hash", "chunk_count", "registered_at")
         row = self._conn.execute(
-            "SELECT name, source_path, content_hash, chunk_count, registered_at FROM corpora WHERE name = ?",
-            (name,),
+            f"SELECT {', '.join(cols)} FROM corpora WHERE name = ?", (name,)
         ).fetchone()
-        if not row:
-            return None
-        return dict(zip(("name", "source_path", "content_hash", "chunk_count", "registered_at"), row))
+        return dict(zip(cols, row)) if row else None
 
     def list_corpora(self) -> list[dict]:
+        cols = ("name", "source_path", "content_hash", "chunk_count", "registered_at")
         rows = self._conn.execute(
-            "SELECT name, source_path, content_hash, chunk_count, registered_at FROM corpora ORDER BY registered_at DESC"
+            f"SELECT {', '.join(cols)} FROM corpora ORDER BY registered_at DESC"
         ).fetchall()
-        return [dict(zip(("name", "source_path", "content_hash", "chunk_count", "registered_at"), r)) for r in rows]
+        return [dict(zip(cols, r)) for r in rows]
 
     def delete_corpus(self, name: str) -> None:
         self._conn.execute("DELETE FROM corpora WHERE name = ?", (name,))
         self._conn.commit()
 
+    # ── Artifacts ────────────────────────────────────────────────────
+
     def register(self, ref: ArtifactRef) -> None:
-        cols = ", ".join(_COLUMNS)
-        placeholders = ", ".join("?" for _ in _COLUMNS)
-        values = tuple(getattr(ref, c) for c in _COLUMNS)
+        cols = ", ".join(_ARTIFACT_COLS)
+        placeholders = ", ".join("?" for _ in _ARTIFACT_COLS)
+        values = tuple(getattr(ref, c) for c in _ARTIFACT_COLS)
         self._conn.execute(
             f"INSERT OR REPLACE INTO artifacts ({cols}) VALUES ({placeholders})",
             values,
         )
         self._conn.commit()
 
-    def get_by_artifact_hash(self, artifact_hash: str) -> ArtifactRef | None:
-        row = self._conn.execute(
-            f"SELECT {', '.join(_COLUMNS)} FROM artifacts WHERE artifact_hash = ?",
-            (artifact_hash,),
-        ).fetchone()
-        return self._row_to_ref(row) if row else None
-
     def get_by_corpus_name(
         self, corpus_name: str, model_id: str | None = None
     ) -> list[ArtifactRef]:
         if model_id:
             rows = self._conn.execute(
-                f"SELECT {', '.join(_COLUMNS)} FROM artifacts WHERE corpus_name = ? AND model_id = ?",
+                f"SELECT {', '.join(_ARTIFACT_COLS)} FROM artifacts "
+                "WHERE corpus_name = ? AND model_id = ? ORDER BY build_timestamp DESC",
                 (corpus_name, model_id),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                f"SELECT {', '.join(_COLUMNS)} FROM artifacts WHERE corpus_name = ?",
+                f"SELECT {', '.join(_ARTIFACT_COLS)} FROM artifacts "
+                "WHERE corpus_name = ? ORDER BY build_timestamp DESC",
                 (corpus_name,),
             ).fetchall()
-        return [self._row_to_ref(r) for r in rows]
+        return [ArtifactRef(**dict(zip(_ARTIFACT_COLS, r))) for r in rows]
 
     def list_all(self) -> list[ArtifactRef]:
         rows = self._conn.execute(
-            f"SELECT {', '.join(_COLUMNS)} FROM artifacts ORDER BY build_timestamp DESC"
+            f"SELECT {', '.join(_ARTIFACT_COLS)} FROM artifacts "
+            "ORDER BY build_timestamp DESC"
         ).fetchall()
-        return [self._row_to_ref(r) for r in rows]
+        return [ArtifactRef(**dict(zip(_ARTIFACT_COLS, r))) for r in rows]
 
     def delete(self, artifact_hash: str) -> None:
         self._conn.execute(
@@ -123,6 +128,11 @@ class CacheRegistry:
         )
         self._conn.commit()
 
-    @staticmethod
-    def _row_to_ref(row: tuple) -> ArtifactRef:
-        return ArtifactRef(**dict(zip(_COLUMNS, row)))
+    def get_orphaned_hashes(self) -> list[str]:
+        """Find artifact hashes whose corpus no longer exists."""
+        rows = self._conn.execute(
+            "SELECT a.artifact_hash FROM artifacts a "
+            "LEFT JOIN corpora c ON a.corpus_name = c.name "
+            "WHERE c.name IS NULL"
+        ).fetchall()
+        return [r[0] for r in rows]

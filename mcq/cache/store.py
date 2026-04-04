@@ -1,11 +1,13 @@
+"""Cache artifact store — save/load KV caches as .safetensors files.
+
+Each artifact is content-addressed: same model + same prefix tokens = same hash.
+Artifacts live in ~/.mcq/artifacts/<hash>.safetensors.
+"""
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-# DEVIATION: Lazy import to allow unit tests to run without mlx-lm installed.
-# Tests mock these names via patch("mcq.cache.store.save_prompt_cache", ...).
 try:
     from mlx_lm.models.cache import load_prompt_cache, save_prompt_cache
 except ImportError:
@@ -48,7 +50,6 @@ class CacheStore:
         }
 
         save_prompt_cache(str(path), cache, metadata)
-
         file_size = path.stat().st_size
 
         ref = ArtifactRef(
@@ -77,3 +78,6 @@ class CacheStore:
         if path.exists():
             path.unlink()
         registry.delete(ref.artifact_hash)
+
+    def list_artifact_files(self) -> list[Path]:
+        return sorted(self._dir.glob("*.safetensors"))

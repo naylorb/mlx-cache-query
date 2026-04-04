@@ -17,7 +17,7 @@ class CorpusStats:
     largest_file_bytes: int
 
     @classmethod
-    def from_corpus(cls, corpus: Corpus) -> "CorpusStats":
+    def from_corpus(cls, corpus: Corpus) -> CorpusStats:
         extensions: dict[str, int] = {}
         total_bytes = 0
         total_lines = 0
@@ -25,12 +25,10 @@ class CorpusStats:
         largest = ("", 0)
 
         for chunk in corpus.chunks:
-            # Extension count
             ext = "." + chunk.source_path.rsplit(".", 1)[-1] if "." in chunk.source_path else "(none)"
             extensions[ext] = extensions.get(ext, 0) + 1
 
-            # Size stats
-            chunk_bytes = len(chunk.content.encode("utf-8"))
+            chunk_bytes = len(chunk.content.encode())
             total_bytes += chunk_bytes
             total_lines += chunk.content.count("\n")
             total_words += len(chunk.content.split())

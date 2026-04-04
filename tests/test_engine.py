@@ -1,7 +1,4 @@
-import time
-from unittest.mock import MagicMock, patch
-
-from mcq.inference.engine import QueryEngine, QueryResult
+from mcq.query.engine import QueryEngine, QueryResult
 
 
 def test_query_result_fields():
@@ -20,4 +17,4 @@ def test_format_query_prompt():
     text = QueryEngine.format_query_prompt("What does this code do?")
     assert "What does this code do?" in text
     assert "</query>" in text
-    assert "<query>" not in text  # opening tag is in the cached prefix, not here
+    assert "<query>" not in text

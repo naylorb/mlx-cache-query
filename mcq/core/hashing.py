@@ -1,3 +1,4 @@
+"""Content-addressed hashing utilities."""
 from __future__ import annotations
 
 import hashlib
@@ -7,10 +8,10 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def artifact_hash_from_prefix(model_revision: str, prefix_tokens: list[int]) -> str:
+def file_content_hash(path_str: str, content: str) -> str:
+    """Hash a single file's contribution to a corpus."""
     hasher = hashlib.sha256()
-    hasher.update(model_revision.encode("utf-8"))
+    hasher.update(path_str.encode())
     hasher.update(b"\x00")
-    for t in prefix_tokens:
-        hasher.update(t.to_bytes(4, "little"))
+    hasher.update(content.encode())
     return hasher.hexdigest()
